@@ -161,6 +161,7 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
             # Wichtig: Uptime Kuma v2 erwartet Keys als Strings im Dictionary (z.B. {"1": True})
             notifications_dict = {str(notif_id): True} if notif_id else {}
 
+
             if not monitor_id:
                 print(f"[DIAGNOSE] Erstelle Monitor mit Payload...", flush=True)
                 monitor_data = {
@@ -203,22 +204,30 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                 cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
                 conn.commit()
 
-            # 3. Benachrichtigung über Socket.io erzwingen
-            if notif_id and monitor_id and hasattr(api, "sio"):
+            # --- EXPLIZITE BENACHRICHTIGUNGS-AKTIVIERUNG (GARANTIERT) ---
+            if notif_id and monitor_id:
+                print(f"[DIAGNOSE] Aktiviere Benachrichtigung für Monitor {monitor_id} (Kanal {notif_id})...", flush=True)
                 try:
-                    edit_payload = {
-                        "id": monitor_id,
-                        "type": "http",
-                        "name": expected_title,
-                        "url": default_url,
-                        "interval": MONITOR_INTERVAL,
-                        "parent": group_id,
-                        "notifications": notifications_dict
-                    }
-                    sio_res = api.sio.call("edit", edit_payload)
-                    print(f"[DIAGNOSE] Benachrichtigung per Sio.call gesetzt für Monitor {monitor_id}: {sio_res}", flush=True)
-                except Exception as sio_err:
-                    print(f"[DIAGNOSE] Sio.call Fehler bei Benachrichtigung: {sio_err}", flush=True)
+                    # Methode 1: Über den direkten Wrapper-Befehl falls vorhanden
+                    if hasattr(api, "add_monitor_notification"):
+                        api.add_monitor_notification(notification_id=notif_id, monitor_id=monitor_id)
+                        print(f"[DIAGNOSE] add_monitor_notification erfolgreich.", flush=True)
+                    
+                    # Methode 2: Über Socket.io Rohdaten-Edit, falls api.sio existiert
+                    if hasattr(api, "sio") and api.sio.connected:
+                        edit_payload = {
+                            "id": monitor_id,
+                            "type": "http",
+                            "name": expected_title,
+                            "url": default_url,
+                            "interval": MONITOR_INTERVAL,
+                            "parent": group_id,
+                            "notifications": {str(notif_id): True}
+                        }
+                        sio_res = api.sio.call("edit", edit_payload)
+                        print(f"[DIAGNOSE] Sio.call 'edit' Antwort: {sio_res}", flush=True)
+                except Exception as notif_err:
+                    print(f"[DIAGNOSE-FEHLER] Konnte Benachrichtigung nicht setzen: {notif_err}", flush=True)
 
             time.sleep(1.0)
             
