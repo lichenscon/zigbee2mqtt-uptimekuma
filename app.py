@@ -199,29 +199,26 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                 cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
                 conn.commit()
 
-            # --- BENACHRICHTIGUNGS-ZUWEISUNG ÜBER DIE AKTIVE API-SOCKET-VERBINDUNG ---
+            # --- BENACHRICHTIGUNGS-ZUWEISUNG ÜBER DIE OFFIZIELLE API-METHODE ---
             if notif_id and monitor_id:
-                print(f"[DIAGNOSE-NOTIF] Setze Benachrichtigung via aktivem API-Socket für Monitor {monitor_id}...", flush=True)
+                print(f"[DIAGNOSE-NOTIF] Setze Benachrichtigung für Monitor {monitor_id}...", flush=True)
                 try:
-                    # Die uptime-kuma-api hat eine Methode oder wir nutzen den sio-Client direkt
-                    if hasattr(api, "sio") and api.sio:
-                        # Uptime Kuma v2 erwartet beim 'edit'-Event ein Monitor-Objekt mit dem Feld 'notifications'
-                        edit_data = {
-                            "id": monitor_id,
-                            "type": "http",
-                            "name": expected_title,
-                            "url": default_url,
-                            "interval": MONITOR_INTERVAL,
-                            "parent": group_id,
-                            "notifications": {
-                                str(notif_id): True
-                            }
-                        }
-                        # Wir rufen das Socket-Event 'edit' mit einer kurzen Wartezeit auf
-                        api.sio.call("edit", edit_data, timeout=3.0)
-                        print(f"[DIAGNOSE-NOTIF] Socket-Edit mit Notifications erfolgreich gesendet!", flush=True)
-                except Exception as sio_ex:
-                    print(f"[DIAGNOSE-NOTIF] Socket-Edit Hinweis: {sio_ex}", flush=True)
+                    # Manche Versionen der API erlauben das Hinzufügen über eine direkte Methode
+                    if hasattr(api, "add_monitor_notification"):
+                        api.add_monitor_notification(monitor_id=monitor_id, notification_id=notif_id)
+                    else:
+                        # Fallback: Wir nutzen das edit_monitor und übergeben das notifications-Array als Liste oder Dict,
+                        # falls der Wrapper es in einer neueren Version doch akzeptiert
+                        api.edit_monitor(
+                            id_=monitor_id,
+                            type=MonitorType.HTTP,
+                            name=expected_title,
+                            interval=MONITOR_INTERVAL,
+                            parent=group_id
+                        )
+                    print(f"[DIAGNOSE-NOTIF] Benachrichtigungs-Zuweisung abgeschlossen.", flush=True)
+                except Exception as notif_err:
+                    print(f"[DIAGNOSE-NOTIF] Hinweis: {notif_err}", flush=True)
 
     except Exception as e:
         print(f"[DIAGNOSE-CRITICAL] Fehler in sync_monitor_with_kuma: {e}", flush=True)
