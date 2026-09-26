@@ -162,17 +162,16 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
             notifications_dict = {str(notif_id): True} if notif_id else {}
 
             if not monitor_id:
-                print(f"[DIAGNOSE] Erstelle Monitor mit Payload...", flush=True)
+                print(f"[DIAGNOSE] Erstelle Monitor (ohne Notifications-Parameter im Wrapper)...", flush=True)
                 
-                # Wir übergeben die Notifications direkt im add_monitor Dictionary
+                # Ohne 'notifications' im Dictionary schlägt der Wrapper-Check nicht fehl
                 monitor_data = {
                     "type": "http",
                     "name": expected_title,
                     "url": default_url,
                     "interval": MONITOR_INTERVAL,
                     "maxretries": 3,
-                    "parent": group_id,
-                    "notifications": notifications_dict
+                    "parent": group_id
                 }
                 
                 res = api.add_monitor(**monitor_data)
@@ -192,8 +191,7 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                         type=MonitorType.HTTP,
                         name=expected_title,
                         interval=MONITOR_INTERVAL,
-                        parent=group_id,
-                        notifications=notifications_dict
+                        parent=group_id
                     )
                 except Exception as e:
                     print(f"[DIAGNOSE] edit_monitor Hinweis: {e}", flush=True)
@@ -201,12 +199,11 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                 cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
                 conn.commit()
 
-            # --- VERBESSERTER SOCKET.IO CALL MIT VOLLSTÄNDIGEM PAYLOAD ---
+            # --- BENACHRICHTIGUNG AUSSCHLIESSLICH PER SOCKET.IO ROHDATEN NACHZIEHEN ---
             if notif_id and monitor_id:
                 print(f"[DIAGNOSE-NOTIF] Sende rohes Socket.io Edit-Event für Monitor {monitor_id}...", flush=True)
                 try:
                     if hasattr(api, "sio") and api.sio:
-                        # Wir übergeben ein vollständiges Monitor-Objekt, damit der Server es nicht verwirft
                         edit_payload = {
                             "id": monitor_id,
                             "type": "http",
@@ -225,9 +222,8 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                     else:
                         print(f"[DIAGNOSE-NOTIF] api.sio nicht verfügbar.", flush=True)
                 except Exception as sio_err:
-                    # Hier geben wir jetzt die echte Exception aus statt sie nur stumm abzufangen
                     print(f"[DIAGNOSE-NOTIF] Socket.io Call Exception: {type(sio_err).__name__}: {sio_err}", flush=True)
-            
+                                
     except Exception as e:
         print(f"[DIAGNOSE-CRITICAL] Fehler in sync_monitor_with_kuma: {e}", flush=True)
         import traceback
