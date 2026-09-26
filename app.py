@@ -61,7 +61,7 @@ init_db()
 
 # --- Uptime Kuma v2 API Hilfsfunktionen ---
 def get_or_create_group(api, group_name):
-    """Sucht oder erstellt einen Uptime Kuma Gruppen-Monitor und fängt die echte ID ab."""
+    """Sucht oder erstellt einen Uptime Kuma Gruppen-Monitor und liest 'monitorID' aus."""
     try:
         monitors = api.get_monitors()
         for m in monitors:
@@ -70,18 +70,12 @@ def get_or_create_group(api, group_name):
                 return m.get("id")
         
         print(f"[DEBUG] Gruppe '{group_name}' existiert nicht. Erstelle neuen Gruppen-Monitor...", flush=True)
-        # Wir übergeben ein Dictionary für den add-Befehl
-        payload = {
-            "type": "group",
-            "name": group_name
-        }
-        res = api.add_monitor(**payload)
+        res = api.add_monitor(type="group", name=group_name)
         print(f"[DEBUG] Rohe add_monitor Antwort für Gruppe '{group_name}': {res}", flush=True)
         
-        # ID aus allen möglichen Schlüsseln herausfischen
-        group_id = res.get("monitorId") or res.get("id") or (res.get("bean") and res.get("bean").get("id"))
+        # Korrekter Schlüssel aus Uptime Kuma v2 API: 'monitorID'
+        group_id = res.get("monitorID") or res.get("monitorId") or res.get("id")
         
-        # Falls immer noch None, holen wir uns die Liste der Monitore neu und suchen nach dem Namen
         if not group_id:
             monitors = api.get_monitors()
             for m in monitors:
@@ -119,7 +113,7 @@ def get_notification_id(api, notif_name):
     return None
 
 def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id=None, cached_notif_id=None):
-    """Erstellt oder aktualisiert einen Monitor und erzwingt die Benachrichtigung über die Rohdaten."""
+    """Erstellt oder aktualisiert einen Monitor und aktiviert die Benachrichtigung zuverlässig."""
     if not UK_USER or not UK_PASS:
         print("[DIAGNOSE] Keine Uptime Kuma Zugangsdaten hinterlegt, Sync übersprungen.", flush=True)
         return None
@@ -155,14 +149,11 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
             notif_id = cached_notif_id if cached_notif_id else get_notification_id(api, NOTIFICATION_NAME)
             print(f"[DIAGNOSE] group_id={group_id}, notif_id={notif_id}", flush=True)
 
-            # Notifications-Dict vorbereiten (z.B. {"1": True})
             notifications_dict = {str(notif_id): True} if notif_id else {}
 
             if not monitor_id:
                 print(f"[DIAGNOSE] Erstelle Monitor mit Payload...", flush=True)
                 
-                # Wir bauen das Monitor-Objekt direkt für den Socket.io/API-Call zusammen,
-                # damit das notifications-Feld garantiert übertragen wird.
                 monitor_data = {
                     "type": "http",
                     "name": expected_title,
@@ -173,19 +164,17 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                     "notifications": notifications_dict
                 }
                 
-                # Versuch über add_monitor mit kwargs oder direktem sio-Call falls unterstützt
                 try:
                     res = api.add_monitor(**monitor_data)
                 except TypeError:
-                    # Fallback ohne notifications, falls der Wrapper blockiert
                     monitor_data.pop("notifications", None)
                     res = api.add_monitor(**monitor_data)
                 
                 print(f"[DEBUG] Rohe add_monitor Antwort für '{expected_title}': {res}", flush=True)
                 
-                monitor_id = res.get("monitorId") or res.get("id")
+                # Korrekter Schlüssel 'monitorID'
+                monitor_id = res.get("monitorID") or res.get("monitorId") or res.get("id")
                 
-                # Falls ID immer noch None ist, über get_monitors suchen
                 if not monitor_id:
                     monitors = api.get_monitors()
                     target = next((m for m in monitors if m.get("name") == expected_title), None)
@@ -197,19 +186,6 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                 if monitor_id:
                     cursor.execute(f"UPDATE devices SET {col_name} = ?, friendly_name = ? WHERE ieee_address = ?", (monitor_id, name, ieee))
                     conn.commit()
-                    
-                    # Wenn notifications beim add_monitor wegen dem Wrapper fehlgeschlagen haben sollten, 
-                    # injizieren wir sie jetzt per rohem sio.call wenn möglich oder edit_monitor:
-                    if notif_id and hasattr(api, "sio"):
-                        try:
-                            monitors = api.get_monitors()
-                            target = next((m for m in monitors if m.get("id") == monitor_id), None)
-                            if target:
-                                target["notifications"] = notifications_dict
-                                sio_res = api.sio.call("edit", target)
-                                print(f"[DIAGNOSE] Sio.call 'edit' Ergebnis für Notifications: {sio_res}", flush=True)
-                        except Exception as sio_err:
-                            print(f"[DIAGNOSE] Sio.call Fehler: {sio_err}", flush=True)
 
             else:
                 print(f"[DIAGNOSE] Editiere bestehenden Monitor ID: {monitor_id}...", flush=True)
@@ -230,15 +206,24 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                         interval=MONITOR_INTERVAL,
                         parent=group_id
                     )
-                    if notif_id and hasattr(api, "sio"):
-                        monitors = api.get_monitors()
-                        target = next((m for m in monitors if m.get("id") == monitor_id), None)
-                        if target:
-                            target["notifications"] = notifications_dict
-                            api.sio.call("edit", target)
 
                 cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
                 conn.commit()
+
+            # --- ZUVERLÄSSIGE BENACHRICHTIGUNGS-AKTIVIERUNG PER SOCKET.IO ---
+            if notif_id and monitor_id and hasattr(api, "sio"):
+                try:
+                    monitors = api.get_monitors()
+                    target = next((m for m in monitors if m.get("id") == monitor_id), None)
+                    if target:
+                        if "notifications" not in target or not isinstance(target["notifications"], dict):
+                            target["notifications"] = {}
+                        target["notifications"][str(notif_id)] = True
+                        
+                        sio_res = api.sio.call("edit", target)
+                        print(f"[DIAGNOSE] Benachrichtigung per Sio.call 'edit' gesetzt für Monitor {monitor_id}: {sio_res}", flush=True)
+                except Exception as sio_err:
+                    print(f"[DIAGNOSE] Sio.call Fehler bei Benachrichtigung: {sio_err}", flush=True)
 
             time.sleep(1.0)
             
