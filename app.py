@@ -65,13 +65,11 @@ def get_or_create_group(api, group_name):
         monitors = api.get_monitors()
         for m in monitors:
             if m.get("name") == group_name and m.get("type") == "group":
-                print(f"[DEBUG] Gruppe '{group_name}' gefunden mit ID {m.get('id')}", flush=True)
+                log_debug(f"Gruppe '{group_name}' gefunden mit ID {m.get('id')}")
                 return m.get("id")
         
-        print(f"[DEBUG] Gruppe '{group_name}' existiert nicht. Erstelle neuen Gruppen-Monitor...", flush=True)
+        log_debug(f"Gruppe '{group_name}' existiert nicht. Erstelle neuen Gruppen-Monitor...")
         res = api.add_monitor(type="group", name=group_name)
-        print(f"[DEBUG] Rohe add_monitor Antwort für Gruppe '{group_name}': {res}", flush=True)
-        
         group_id = res.get("monitorID") or res.get("monitorId") or res.get("id")
         
         if not group_id:
@@ -81,7 +79,6 @@ def get_or_create_group(api, group_name):
                     group_id = m.get("id")
                     break
                     
-        print(f"[DEBUG] Ermittelte Group-ID für '{group_name}': {group_id}", flush=True)
         return group_id
     except Exception as e:
         print(f"[DIAGNOSE-FEHLER] Gruppe erstellen fehlgeschlagen: {e}", flush=True)
@@ -90,27 +87,20 @@ def get_or_create_group(api, group_name):
 def get_notification_id(api, notif_name):
     """Sucht die ID des konfigurierten Benachrichtigungs-Kanals anhand des Namens."""
     if not notif_name:
-        print("[DEBUG-NOTIF] NOTIFICATION_NAME ist leer! Bitte in docker-compose.yml setzen.", flush=True)
         return None
     try:
-        print(f"[DEBUG-NOTIF] Frage Benachrichtigungs-Kanäle ab, suche nach: '{notif_name}'", flush=True)
         notifications = api.get_notifications()
-        print(f"[DEBUG-NOTIF] Empfangene Kanäle von Kuma: {notifications}", flush=True)
-        
         for n in notifications:
             n_name = n.get("name")
             n_id = n.get("id")
             if n_name and n_name.lower() == notif_name.lower():
-                print(f"[DEBUG-NOTIF] Benachrichtigungs-Kanal '{n_name}' erfolgreich erkannt mit ID {n_id}", flush=True)
                 return n_id
-                
-        print(f"[DEBUG-NOTIF] ACHTUNG: Kanal '{notif_name}' wurde nicht gefunden!", flush=True)
     except Exception as e:
         print(f"[DEBUG-NOTIF] Fehler beim Abrufen der Benachrichtigungen: {e}", flush=True)
     return None
 
-def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id=None, cached_notif_id=None):
-    """Erstellt oder aktualisiert einen Monitor, prüft die reale Existenz und setzt Benachrichtigungen per Socket.io."""
+def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id=None):
+    """Erstellt oder aktualisiert einen Monitor, prüft die Existenz und setzt Benachrichtigungen per Socket.io."""
     if not UK_USER or not UK_PASS:
         print("[DIAGNOSE] Keine Uptime Kuma Zugangsdaten hinterlegt, Sync übersprungen.", flush=True)
         return None
@@ -135,25 +125,27 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
         with UptimeKumaApi(UPTIME_KUMA_URL) as api:
             api.login(UK_USER, UK_PASS)
             
+            # Benachrichtigungs-ID direkt vor Ort ermitteln
+            notif_id = get_notification_id(api, NOTIFICATION_NAME)
+            
             if monitor_id:
                 all_monitors = api.get_monitors()
                 exists = any(m.get("id") == monitor_id or m.get("monitorID") == monitor_id for m in all_monitors)
                 if not exists:
-                    print(f"[DIAGNOSE] Monitor ID {monitor_id} für '{expected_title}' wurde in Uptime Kuma gelöscht. Setze DB zurück...", flush=True)
+                    print(f"[DIAGNOSE] Monitor ID {monitor_id} für '{expected_title}' wurde gelöscht. Setze DB zurück...", flush=True)
                     cursor.execute(f"UPDATE devices SET {col_name} = NULL WHERE ieee_address = ?", (ieee,))
                     conn.commit()
                     monitor_id = None
 
             if monitor_id and db_friendly_name == name:
-                print(f"[DIAGNOSE] Monitor für '{expected_title}' unverändert. Sync übersprungen.", flush=True)
+                log_debug(f"Monitor für '{expected_title}' unverändert. Sync übersprungen.")
                 conn.close()
                 return monitor_id
 
             group_id = cached_group_id if cached_group_id else get_or_create_group(api, group_name)
-            print(f"[DIAGNOSE] group_id={group_id}", flush=True)
 
             if not monitor_id:
-                print(f"[DIAGNOSE] Erstelle Monitor...", flush=True)
+                print(f"[DIAGNOSE] Erstelle Monitor '{expected_title}'...", flush=True)
                 monitor_data = {
                     "type": "http",
                     "name": expected_title,
@@ -164,10 +156,7 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                 }
                 
                 res = api.add_monitor(**monitor_data)
-                print(f"[DEBUG] Rohe add_monitor Antwort für '{expected_title}': {res}", flush=True)
-                
                 monitor_id = res.get("monitorID") or res.get("monitorId") or res.get("id")
-                print(f"[DIAGNOSE] Ermittelte Monitor-ID: {monitor_id}", flush=True)
                 
                 if monitor_id:
                     cursor.execute(f"UPDATE devices SET {col_name} = ?, friendly_name = ? WHERE ieee_address = ?", (monitor_id, name, ieee))
@@ -182,15 +171,14 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                         interval=MONITOR_INTERVAL,
                         parent=group_id
                     )
-                    print(f"[DIAGNOSE] Monitor erfolgreich editiert.", flush=True)
                 except Exception as e:
                     print(f"[DIAGNOSE] edit_monitor Hinweis: {e}", flush=True)
 
                 cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
                 conn.commit()
 
-            # --- DIREKTE SOCKET.IO ZUWEISUNG MIT 10 SEKUNDEN TIMEOUT ---
-            if cached_notif_id and monitor_id:
+            # --- DIREKTE SOCKET.IO ZUWEISUNG MIT 10s TIMEOUT ---
+            if notif_id and monitor_id:
                 try:
                     if hasattr(api, "sio") and api.sio:
                         full_payload = {
@@ -204,10 +192,10 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                             "parent": group_id,
                             "ignoreTls": False,
                             "upsideDown": False,
-                            "notifications": {str(cached_notif_id): True}
+                            "notifications": {str(notif_id): True}
                         }
                         api.sio.call("edit", full_payload, timeout=10.0)
-                        log_debug(f"Benachrichtigung {cached_notif_id} per Socket.io für Monitor {monitor_id} gesetzt.")
+                        log_debug(f"Benachrichtigung {notif_id} per Socket.io für Monitor {monitor_id} gesetzt.")
                 except Exception as socket_err:
                     print(f"[DIAGNOSE-NOTIF] Socket-Zuweisung Hinweis für Monitor {monitor_id}: {socket_err}", flush=True)
 
@@ -241,28 +229,15 @@ def on_message(client, userdata, msg):
             
             cached_online_group = None
             cached_battery_group = None
-            cached_notif_id = None
             
             if UK_USER and UK_PASS:
                 try:
                     with UptimeKumaApi(UPTIME_KUMA_URL) as api:
                         api.login(UK_USER, UK_PASS)
-                        
-                        try:
-                            cached_online_group = get_or_create_group(api, ONLINE_GROUP_NAME)
-                            cached_battery_group = get_or_create_group(api, BATTERY_GROUP_NAME)
-                        except Exception as group_err:
-                            print(f"[FEHLER] Konnte Gruppen nicht laden: {group_err}", flush=True)
-
-                        try:
-                            cached_notif_id = get_notification_id(api, NOTIFICATION_NAME)
-                            if not cached_notif_id:
-                                print(f"[WARNUNG] Benachrichtigung '{NOTIFICATION_NAME}' wurde nicht gefunden!", flush=True)
-                        except Exception as notif_err:
-                            print(f"[FEHLER] Konnte Benachrichtigungs-ID nicht abrufen: {notif_err}", flush=True)
-                            
+                        cached_online_group = get_or_create_group(api, ONLINE_GROUP_NAME)
+                        cached_battery_group = get_or_create_group(api, BATTERY_GROUP_NAME)
                 except Exception as e:
-                    print(f"Konnte Uptime Kuma Verbindung nicht herstellen: {e}")
+                    print(f"Konnte Uptime Kuma Gruppen nicht vorab laden: {e}")
 
             for d in devices:
                 if d.get("type") == "Coordinator":
@@ -286,9 +261,9 @@ def on_message(client, userdata, msg):
                     """, (ieee, friendly_name, has_battery))
                     conn.commit()
                 
-                sync_monitor_with_kuma(ieee, friendly_name, is_battery_monitor=False, cached_group_id=cached_online_group, cached_notif_id=cached_notif_id)
+                sync_monitor_with_kuma(ieee, friendly_name, is_battery_monitor=False, cached_group_id=cached_online_group)
                 if has_battery:
-                    sync_monitor_with_kuma(ieee, friendly_name, is_battery_monitor=True, cached_group_id=cached_battery_group, cached_notif_id=cached_notif_id)
+                    sync_monitor_with_kuma(ieee, friendly_name, is_battery_monitor=True, cached_group_id=cached_battery_group)
 
         else:
             parts = topic.split("/")
@@ -308,7 +283,6 @@ def on_message(client, userdata, msg):
                         battery = data.get("battery")
                         current_time = time.time()
                         
-                        log_debug(f"Aktualisiere DB für IEEE {ieee}: online={online}, battery={battery}")
                         cursor.execute("""
                             UPDATE devices SET online = ?, battery = COALESCE(?, battery), last_seen = ?
                             WHERE ieee_address = ?
@@ -327,7 +301,6 @@ def background_poll_loop():
         time.sleep(POLL_INTERVAL)
         try:
             if mqtt_client_global and mqtt_client_global.is_connected():
-                log_debug("Polling-Loop: Frage aktualisierte Gerätedaten bei Zigbee2MQTT an...")
                 mqtt_client_global.publish(f"{ZIGBEE_TOPIC}/bridge/devices/get", "")
         except Exception as e:
             print(f"Fehler im Polling-Loop: {e}")
@@ -358,7 +331,6 @@ threading.Thread(target=start_mqtt, daemon=True).start()
 
 @app.route("/api/device/<ieee>/online", methods=["GET"])
 def check_online(ieee):
-    log_debug(f"HTTP Anfrage /online für IEEE: {ieee}")
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT online, last_seen, friendly_name FROM devices WHERE ieee_address = ?", (ieee,))
@@ -366,7 +338,6 @@ def check_online(ieee):
     conn.close()
     
     if not row:
-        log_debug(f"Gerät {ieee} nicht gefunden.")
         return jsonify({"error": "Device not found"}), 404
     
     online, last_seen, name = row
@@ -374,15 +345,12 @@ def check_online(ieee):
     current_time = time.time()
     
     if online is None or online == 0 or (last_seen and (current_time - last_seen) > offline_timeout):
-        log_debug(f"Gerät {name} ({ieee}) ist OFFLINE (letztes Lebenszeichen vor {int(current_time - (last_seen or 0))}s)")
         return jsonify({"status": "offline", "device": name}), 503
     
-    log_debug(f"Gerät {name} ({ieee}) Status: ONLINE")
     return jsonify({"status": "online", "device": name}), 200
 
 @app.route("/api/device/<ieee>/battery", methods=["GET"])
 def check_battery(ieee):
-    log_debug(f"HTTP Anfrage /battery für IEEE: {ieee} mit Args: {request.args}")
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT battery, has_battery, friendly_name FROM devices WHERE ieee_address = ?", (ieee,))
@@ -390,17 +358,14 @@ def check_battery(ieee):
     conn.close()
     
     if not row:
-        log_debug(f"Gerät {ieee} nicht gefunden.")
         return jsonify({"error": "Device not found"}), 404
     
     battery, has_battery, name = row
     
     if not has_battery:
-        log_debug(f"Gerät {name} hat keine Batterie.")
         return jsonify({"error": "Device is not battery powered"}), 400
         
     if battery is None:
-        log_debug(f"Für Gerät {name} liegen noch keine Batteriedaten vor.")
         return jsonify({"error": "No battery data available yet"}), 503
     
     threshold = BATTERY_THRESHOLD
@@ -409,10 +374,8 @@ def check_battery(ieee):
         try:
             threshold = float(threshold_param)
         except ValueError:
-            log_debug(f"Ungültiger Threshold-Parameter: {threshold_param}")
             return jsonify({"error": "Invalid threshold parameter"}), 400
         
-    log_debug(f"Gerät {name} Batterie: {battery}% (Schwellenwert: {threshold}%)")
     if battery >= threshold:
         return jsonify({"status": "ok", "battery_percent": battery, "threshold_used": threshold, "device": name}), 200
     else:
