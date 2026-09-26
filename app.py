@@ -109,23 +109,8 @@ def get_notification_id(api, notif_name):
         print(f"[DEBUG-NOTIF] Fehler beim Abrufen der Benachrichtigungen: {e}", flush=True)
     return None
 
-def set_notification_default_status(api, notif_id, make_default=True):
-    """Schaltet das isDefault-Flag eines Benachrichtigungskanals temporär um."""
-    try:
-        notifications = api.get_notifications()
-        for n in notifications:
-            if n.get("id") == notif_id:
-                n["isDefault"] = make_default
-                n.pop("id", None)
-                api.edit_notification(id_=notif_id, **n)
-                print(f"[DEBUG] Benachrichtigung ID {notif_id} ('{n.get('name')}') isDefault auf {make_default} gesetzt.", flush=True)
-                return True
-    except Exception as e:
-        print(f"[DEBUG] Fehler beim Umschalten des Default-Status für Benachrichtigung: {e}", flush=True)
-    return False
-
-def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id=None):
-    """Erstellt oder aktualisiert einen Monitor, prüft die reale Existenz in Uptime Kuma."""
+def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id=None, cached_notif_id=None):
+    """Erstellt oder aktualisiert einen Monitor, prüft die reale Existenz und setzt Benachrichtigungen per Socket.io."""
     if not UK_USER or not UK_PASS:
         print("[DIAGNOSE] Keine Uptime Kuma Zugangsdaten hinterlegt, Sync übersprungen.", flush=True)
         return None
@@ -204,7 +189,29 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                 cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
                 conn.commit()
 
-            time.sleep(0.2)
+            # --- DIREKTE SOCKET.IO ZUWEISUNG MIT 10 SEKUNDEN TIMEOUT ---
+            if cached_notif_id and monitor_id:
+                try:
+                    if hasattr(api, "sio") and api.sio:
+                        full_payload = {
+                            "id": monitor_id,
+                            "type": "http",
+                            "name": expected_title,
+                            "url": default_url,
+                            "interval": MONITOR_INTERVAL,
+                            "retryInterval": 60,
+                            "maxretries": 3,
+                            "parent": group_id,
+                            "ignoreTls": False,
+                            "upsideDown": False,
+                            "notifications": {str(cached_notif_id): True}
+                        }
+                        api.sio.call("edit", full_payload, timeout=10.0)
+                        log_debug(f"Benachrichtigung {cached_notif_id} per Socket.io für Monitor {monitor_id} gesetzt.")
+                except Exception as socket_err:
+                    print(f"[DIAGNOSE-NOTIF] Socket-Zuweisung Hinweis für Monitor {monitor_id}: {socket_err}", flush=True)
+
+            time.sleep(0.1)
             
     except Exception as e:
         print(f"[DIAGNOSE-CRITICAL] Fehler in sync_monitor_with_kuma: {e}", flush=True)
@@ -249,12 +256,10 @@ def on_message(client, userdata, msg):
 
                         try:
                             cached_notif_id = get_notification_id(api, NOTIFICATION_NAME)
-                            if cached_notif_id:
-                                set_notification_default_status(api, cached_notif_id, make_default=True)
-                            else:
+                            if not cached_notif_id:
                                 print(f"[WARNUNG] Benachrichtigung '{NOTIFICATION_NAME}' wurde nicht gefunden!", flush=True)
                         except Exception as notif_err:
-                            print(f"[FEHLER] Konnte Benachrichtigungs-Default nicht setzen: {notif_err}", flush=True)
+                            print(f"[FEHLER] Konnte Benachrichtigungs-ID nicht abrufen: {notif_err}", flush=True)
                             
                 except Exception as e:
                     print(f"Konnte Uptime Kuma Verbindung nicht herstellen: {e}")
@@ -281,17 +286,9 @@ def on_message(client, userdata, msg):
                     """, (ieee, friendly_name, has_battery))
                     conn.commit()
                 
-                sync_monitor_with_kuma(ieee, friendly_name, is_battery_monitor=False, cached_group_id=cached_online_group)
+                sync_monitor_with_kuma(ieee, friendly_name, is_battery_monitor=False, cached_group_id=cached_online_group, cached_notif_id=cached_notif_id)
                 if has_battery:
-                    sync_monitor_with_kuma(ieee, friendly_name, is_battery_monitor=True, cached_group_id=cached_battery_group)
-
-            if UK_USER and UK_PASS and cached_notif_id:
-                try:
-                    with UptimeKumaApi(UPTIME_KUMA_URL) as api:
-                        api.login(UK_USER, UK_PASS)
-                        set_notification_default_status(api, cached_notif_id, make_default=False)
-                except Exception as e:
-                    print(f"Konnte Default-Status der Benachrichtigung nicht zurücksetzen: {e}")
+                    sync_monitor_with_kuma(ieee, friendly_name, is_battery_monitor=True, cached_group_id=cached_battery_group, cached_notif_id=cached_notif_id)
 
         else:
             parts = topic.split("/")
