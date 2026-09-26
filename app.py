@@ -116,7 +116,9 @@ def set_notification_default_status(api, notif_id, make_default=True):
         for n in notifications:
             if n.get("id") == notif_id:
                 n["isDefault"] = make_default
-                api.edit_notification(id=notif_id, **n)
+                # ID explizit als id_ übergeben und aus dem Payload entfernen, um Kollisionen zu vermeiden
+                n.pop("id", None)
+                api.edit_notification(id_=notif_id, **n)
                 print(f"[DEBUG] Benachrichtigung ID {notif_id} ('{n.get('name')}') isDefault auf {make_default} gesetzt.", flush=True)
                 return True
     except Exception as e:
