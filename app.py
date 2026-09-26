@@ -3,7 +3,6 @@ import sqlite3
 import threading
 import time
 import json
-import requests
 import paho.mqtt.client as mqtt
 from flask import Flask, jsonify, request
 from uptime_kuma_api import UptimeKumaApi, MonitorType
@@ -73,7 +72,6 @@ def get_or_create_group(api, group_name):
         res = api.add_monitor(type="group", name=group_name)
         print(f"[DEBUG] Rohe add_monitor Antwort für Gruppe '{group_name}': {res}", flush=True)
         
-        # Korrekter Schlüssel aus Uptime Kuma v2 API: 'monitorID'
         group_id = res.get("monitorID") or res.get("monitorId") or res.get("id")
         
         if not group_id:
@@ -90,7 +88,7 @@ def get_or_create_group(api, group_name):
         return None
 
 def get_notification_id(api, notif_name):
-    """Sucht die ID des konfigurierten Benachrichtigungs-Kanals anhand des Namens und loggt alle verfügbaren."""
+    """Sucht die ID des konfigurierten Benachrichtigungs-Kanals anhand des Namens."""
     if not notif_name:
         print("[DEBUG] NOTIFICATION_NAME ist leer oder nicht konfiguriert. Keine Benachrichtigungen werden verknüpft.")
         return None
@@ -100,20 +98,33 @@ def get_notification_id(api, notif_name):
         print(f"[DEBUG] Von Uptime Kuma empfangene Benachrichtigungen: {notifications}")
         
         for n in notifications:
-            # Uptime Kuma API gibt den Namen meist im Feld 'name' zurück
             n_name = n.get("name")
             n_id = n.get("id")
             if n_name and n_name.lower() == notif_name.lower():
                 print(f"[DEBUG] Benachrichtigungs-Kanal '{n_name}' erfolgreich erkannt mit ID {n_id}")
                 return n_id
                 
-        print(f"[DEBUG] ACHTUNG: Benachrichtigungs-Kanal '{notif_name}' wurde in Uptime Kuma nicht gefunden! Prüfe den Namen.")
+        print(f"[DEBUG] ACHTUNG: Benachrichtigungs-Kanal '{notif_name}' wurde in Uptime Kuma nicht gefunden!")
     except Exception as e:
         print(f"[DEBUG] Fehler beim Abrufen der Benachrichtigungen von Uptime Kuma: {e}")
     return None
 
-def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id=None, cached_notif_id=None):
-    """Erstellt oder aktualisiert einen Monitor, prüft die reale Existenz in Uptime Kuma und setzt Benachrichtigungen."""
+def set_notification_default_status(api, notif_id, make_default=True):
+    """Schaltet das isDefault-Flag eines Benachrichtigungskanals temporär um."""
+    try:
+        notifications = api.get_notifications()
+        for n in notifications:
+            if n.get("id") == notif_id:
+                n["isDefault"] = make_default
+                api.edit_notification(id=notif_id, **n)
+                print(f"[DEBUG] Benachrichtigung ID {notif_id} ('{n.get('name')}') isDefault auf {make_default} gesetzt.", flush=True)
+                return True
+    except Exception as e:
+        print(f"[DEBUG] Fehler beim Umschalten des Default-Status für Benachrichtigung: {e}", flush=True)
+    return False
+
+def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id=None):
+    """Erstellt oder aktualisiert einen Monitor, prüft die reale Existenz in Uptime Kuma."""
     if not UK_USER or not UK_PASS:
         print("[DIAGNOSE] Keine Uptime Kuma Zugangsdaten hinterlegt, Sync übersprungen.", flush=True)
         return None
@@ -138,7 +149,7 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
         with UptimeKumaApi(UPTIME_KUMA_URL) as api:
             api.login(UK_USER, UK_PASS)
             
-            # 1. Prüfen, ob ein gespeicherter Monitor in Uptime Kuma in Wirklichkeit gelöscht wurde
+            # 1. Prüfen, ob ein gespeicherter Monitor in Uptime Kuma gelöscht wurde
             if monitor_id:
                 all_monitors = api.get_monitors()
                 exists = any(m.get("id") == monitor_id or m.get("monitorID") == monitor_id for m in all_monitors)
@@ -155,11 +166,7 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                 return monitor_id
 
             group_id = cached_group_id if cached_group_id else get_or_create_group(api, group_name)
-            notif_id = cached_notif_id if cached_notif_id else get_notification_id(api, NOTIFICATION_NAME)
-            print(f"[DIAGNOSE] group_id={group_id}, notif_id={notif_id}", flush=True)
-
-            # Wichtig: Uptime Kuma v2 erwartet Keys als Strings im Dictionary (z.B. {"1": True})
-            notifications_dict = {str(notif_id): True} if notif_id else {}
+            print(f"[DIAGNOSE] group_id={group_id}", flush=True)
 
             if not monitor_id:
                 print(f"[DIAGNOSE] Erstelle Monitor...", flush=True)
@@ -184,7 +191,6 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
             else:
                 print(f"[DIAGNOSE] Editiere bestehenden Monitor ID: {monitor_id}...", flush=True)
                 try:
-                    # Korrekter Parameter in dieser Bibliotheks-Version ist 'id_' (mit Unterstrich)
                     api.edit_monitor(
                         id_=monitor_id,
                         type=MonitorType.HTTP,
@@ -192,34 +198,15 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                         interval=MONITOR_INTERVAL,
                         parent=group_id
                     )
-                    print(f"[DIAGNOSE-NOTIF] Monitor erfolgreich editiert.", flush=True)
+                    print(f"[DIAGNOSE] Monitor erfolgreich editiert.", flush=True)
                 except Exception as e:
                     print(f"[DIAGNOSE] edit_monitor Hinweis: {e}", flush=True)
 
                 cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
                 conn.commit()
 
-            # --- BENACHRICHTIGUNGS-ZUWEISUNG ÜBER DIE OFFIZIELLE API-METHODE ---
-            if notif_id and monitor_id:
-                print(f"[DIAGNOSE-NOTIF] Setze Benachrichtigung für Monitor {monitor_id}...", flush=True)
-                try:
-                    # Manche Versionen der API erlauben das Hinzufügen über eine direkte Methode
-                    if hasattr(api, "add_monitor_notification"):
-                        api.add_monitor_notification(monitor_id=monitor_id, notification_id=notif_id)
-                    else:
-                        # Fallback: Wir nutzen das edit_monitor und übergeben das notifications-Array als Liste oder Dict,
-                        # falls der Wrapper es in einer neueren Version doch akzeptiert
-                        api.edit_monitor(
-                            id_=monitor_id,
-                            type=MonitorType.HTTP,
-                            name=expected_title,
-                            interval=MONITOR_INTERVAL,
-                            parent=group_id
-                        )
-                    print(f"[DIAGNOSE-NOTIF] Benachrichtigungs-Zuweisung abgeschlossen.", flush=True)
-                except Exception as notif_err:
-                    print(f"[DIAGNOSE-NOTIF] Hinweis: {notif_err}", flush=True)
-
+            time.sleep(0.2)
+            
     except Exception as e:
         print(f"[DIAGNOSE-CRITICAL] Fehler in sync_monitor_with_kuma: {e}", flush=True)
         import traceback
@@ -257,6 +244,10 @@ def on_message(client, userdata, msg):
                         cached_online_group = get_or_create_group(api, ONLINE_GROUP_NAME)
                         cached_battery_group = get_or_create_group(api, BATTERY_GROUP_NAME)
                         cached_notif_id = get_notification_id(api, NOTIFICATION_NAME)
+                        
+                        # --- WORKAROUND: Kanal temporär als Default setzen ---
+                        if cached_notif_id:
+                            set_notification_default_status(api, cached_notif_id, make_default=True)
                 except Exception as e:
                     print(f"Konnte Uptime Kuma Gruppen/Benachrichtigungen nicht vorab laden: {e}")
 
@@ -282,9 +273,18 @@ def on_message(client, userdata, msg):
                     """, (ieee, friendly_name, has_battery))
                     conn.commit()
                 
-                sync_monitor_with_kuma(ieee, friendly_name, is_battery_monitor=False, cached_group_id=cached_online_group, cached_notif_id=cached_notif_id)
+                sync_monitor_with_kuma(ieee, friendly_name, is_battery_monitor=False, cached_group_id=cached_online_group)
                 if has_battery:
-                    sync_monitor_with_kuma(ieee, friendly_name, is_battery_monitor=True, cached_group_id=cached_battery_group, cached_notif_id=cached_notif_id)
+                    sync_monitor_with_kuma(ieee, friendly_name, is_battery_monitor=True, cached_group_id=cached_battery_group)
+
+            # --- WORKAROUND: Default-Status der Benachrichtigung wieder zurücksetzen ---
+            if UK_USER and UK_PASS and cached_notif_id:
+                try:
+                    with UptimeKumaApi(UPTIME_KUMA_URL) as api:
+                        api.login(UK_USER, UK_PASS)
+                        set_notification_default_status(api, cached_notif_id, make_default=False)
+                except Exception as e:
+                    print(f"Konnte Default-Status der Benachrichtigung nicht zurücksetzen: {e}")
 
         else:
             parts = topic.split("/")
@@ -300,7 +300,6 @@ def on_message(client, userdata, msg):
                     if row:
                         ieee, has_battery = row
                         
-                        # Jede eingehende MQTT-Nachricht des Geräts bedeutet, es ist online und aktiv!
                         online = 1
                         battery = data.get("battery")
                         current_time = time.time()
@@ -367,14 +366,11 @@ def check_online(ieee):
         return jsonify({"error": "Device not found"}), 404
     
     online, last_seen, name = row
-    
-    # Optionaler Timeout-Check: Wenn ein Gerät seit z.B. 4 Stunden (14400 Sekunden) kein Lebenszeichen 
-    # von sich gegeben hat, werten wir es als offline, selbst wenn der letzte Status mal 1 war.
     offline_timeout = int(os.getenv("OFFLINE_TIMEOUT_SECONDS", 14400))
     current_time = time.time()
     
     if online is None or online == 0 or (last_seen and (current_time - last_seen) > offline_timeout):
-        log_debug(f"Gerät {name} ({ieee}) ist OFFLE (letztes Lebenszeichen vor {int(current_time - (last_seen or 0))}s)")
+        log_debug(f"Gerät {name} ({ieee}) ist OFFLINE (letztes Lebenszeichen vor {int(current_time - (last_seen or 0))}s)")
         return jsonify({"status": "offline", "device": name}), 503
     
     log_debug(f"Gerät {name} ({ieee}) Status: ONLINE")
