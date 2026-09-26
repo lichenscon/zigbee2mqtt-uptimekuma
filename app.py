@@ -199,22 +199,23 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                 cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
                 conn.commit()
 
-           # --- NACHTRÄGLICHE BENACHRICHTIGUNGS-AKTIVIERUNG ---
+           # --- ZUVERLÄSSIGE BENACHRICHTIGUNGS-AKTIVIERUNG ÜBER SOCKET.IO ---
             if notif_id and monitor_id:
-                print(f"[DIAGNOSE-NOTIF] Setze Benachrichtigung für Monitor {monitor_id}...", flush=True)
+                print(f"[DIAGNOSE-NOTIF] Verknüpfe Benachrichtigung Kanal {notif_id} mit Monitor {monitor_id}...", flush=True)
                 try:
-                    # Übergabe der ID mit Unterstrich (id_) für diese API-Version
-                    api.edit_monitor(
-                        id_=monitor_id,
-                        type=MonitorType.HTTP,
-                        name=expected_title,
-                        interval=MONITOR_INTERVAL,
-                        parent=group_id
-                    )
-                    print(f"[DIAGNOSE-NOTIF] Benachrichtigungs-Update erfolgreich für Monitor {monitor_id}!", flush=True)
+                    # Uptime Kuma nutzt intern den Socket.io Event-Call 'addMonitorNotification'
+                    if hasattr(api, "sio") and api.sio:
+                        payload = {
+                            "monitorId": monitor_id,
+                            "notificationId": notif_id
+                        }
+                        sio_res = api.sio.call("addMonitorNotification", payload, timeout=3.0)
+                        print(f"[DIAGNOSE-NOTIF] Socket.io 'addMonitorNotification' erfolgreich: {sio_res}", flush=True)
+                    else:
+                        print(f"[DIAGNOSE-NOTIF] api.sio nicht verfügbar.", flush=True)
                 except Exception as notif_err:
-                    print(f"[DIAGNOSE-NOTIF] Hinweis zum Benachrichtigungs-Update: {notif_err}", flush=True)
-                    
+                    print(f"[DIAGNOSE-NOTIF] Benachrichtigungs-Verknüpfung Hinweis: {notif_err}", flush=True)
+
     except Exception as e:
         print(f"[DIAGNOSE-CRITICAL] Fehler in sync_monitor_with_kuma: {e}", flush=True)
         import traceback
