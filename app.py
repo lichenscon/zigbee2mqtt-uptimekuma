@@ -113,7 +113,7 @@ def get_notification_id(api, notif_name):
     return None
 
 def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id=None, cached_notif_id=None):
-    """Erstellt oder aktualisiert einen Monitor und aktiviert die Benachrichtigung zuverlässig."""
+    """Erstellt oder aktualisiert einen Monitor und setzt Benachrichtigungen direkt über die bekannte ID."""
     if not UK_USER or not UK_PASS:
         print("[DIAGNOSE] Keine Uptime Kuma Zugangsdaten hinterlegt, Sync übersprungen.", flush=True)
         return None
@@ -160,27 +160,14 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                     "url": default_url,
                     "interval": MONITOR_INTERVAL,
                     "maxretries": 3,
-                    "parent": group_id,
-                    "notifications": notifications_dict
+                    "parent": group_id
                 }
                 
-                try:
-                    res = api.add_monitor(**monitor_data)
-                except TypeError:
-                    monitor_data.pop("notifications", None)
-                    res = api.add_monitor(**monitor_data)
-                
+                res = api.add_monitor(**monitor_data)
                 print(f"[DEBUG] Rohe add_monitor Antwort für '{expected_title}': {res}", flush=True)
                 
-                # Korrekter Schlüssel 'monitorID'
+                # Korrekter Schlüssel 'monitorID' aus Uptime Kuma v2
                 monitor_id = res.get("monitorID") or res.get("monitorId") or res.get("id")
-                
-                if not monitor_id:
-                    monitors = api.get_monitors()
-                    target = next((m for m in monitors if m.get("name") == expected_title), None)
-                    if target:
-                        monitor_id = target.get("id")
-
                 print(f"[DIAGNOSE] Ermittelte Monitor-ID: {monitor_id}", flush=True)
                 
                 if monitor_id:
@@ -195,36 +182,29 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                         type=MonitorType.HTTP,
                         name=expected_title,
                         interval=MONITOR_INTERVAL,
-                        parent=group_id,
-                        notifications=notifications_dict
-                    )
-                except TypeError:
-                    api.edit_monitor(
-                        id=monitor_id,
-                        type=MonitorType.HTTP,
-                        name=expected_title,
-                        interval=MONITOR_INTERVAL,
                         parent=group_id
                     )
+                except Exception as e:
+                    print(f"[DIAGNOSE] Standard edit_monitor Hinweis: {e}", flush=True)
 
                 cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
                 conn.commit()
 
-            # --- ZUVERLÄSSIGE BENACHRICHTIGUNGS-AKTIVIERUNG PER SOCKET.IO ---
+            # --- DIREKTE BENACHRICHTIGUNGS-AKTIVIERUNG OHNE UMWEGE ---
             if notif_id and monitor_id and hasattr(api, "sio"):
                 try:
-                    print(f"[DIAGNOSE] Hole Monitor-Details für ID {monitorID if 'monitorID' in locals() else monitor_id} zur Benachrichtigungs-Aktualisierung...", flush=True)
-                    monitors = api.get_monitors()
-                    target = next((m for m in monitors if m.get("id") == monitor_id or m.get("monitorID") == monitor_id), None)
-                    if target:
-                        if "notifications" not in target or not isinstance(target["notifications"], dict):
-                            target["notifications"] = {}
-                        target["notifications"][str(notif_id)] = True
-                        
-                        sio_res = api.sio.call("edit", target)
-                        print(f"[DIAGNOSE] Benachrichtigung per Sio.call 'edit' gesetzt für Monitor {monitor_id}: {sio_res}", flush=True)
-                    else:
-                        print(f"[DIAGNOSE] Konnte Monitor ID {monitor_id} für Benachrichtigungs-Update nicht in der Monitor-Liste finden.", flush=True)
+                    # Da wir die ID kennen, bauen wir das Update-Objekt direkt zusammen
+                    edit_payload = {
+                        "id": monitor_id,
+                        "type": "http",
+                        "name": expected_title,
+                        "url": default_url,
+                        "interval": MONITOR_INTERVAL,
+                        "parent": group_id,
+                        "notifications": notifications_dict
+                    }
+                    sio_res = api.sio.call("edit", edit_payload)
+                    print(f"[DIAGNOSE] Benachrichtigung direkt per Sio.call gesetzt für Monitor {monitor_id}: {sio_res}", flush=True)
                 except Exception as sio_err:
                     print(f"[DIAGNOSE] Sio.call Fehler bei Benachrichtigung: {sio_err}", flush=True)
 
