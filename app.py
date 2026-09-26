@@ -97,7 +97,7 @@ def get_notification_id(api, notif_name):
     return None
 
 def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id=None, cached_notif_id=None):
-    """Erstellt oder aktualisiert einen Monitor in Uptime Kuma und verknüpft Benachrichtigungen."""
+    """Erstellt oder aktualisiert einen Monitor in Uptime Kuma und aktiviert die Benachrichtigung."""
     if not UK_USER or not UK_PASS:
         log_debug("Keine Uptime Kuma Zugangsdaten hinterlegt, Sync übersprungen.")
         return None
@@ -130,42 +130,73 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
             
             group_id = cached_group_id if cached_group_id else get_or_create_group(api, group_name)
             notif_id = cached_notif_id if cached_notif_id else get_notification_id(api, NOTIFICATION_NAME)
+            
+            # Benachrichtigungs-Dictionary für Uptime Kuma v2 aufbauen (z.B. {"1": True})
+            notifications_dict = {str(notif_id): True} if notif_id else {}
 
             if not monitor_id:
-                log_debug(f"Erstelle neuen Uptime Kuma Monitor: {expected_title}")
-                res = api.add_monitor(
-                    type=MonitorType.HTTP,
-                    name=expected_title,
-                    url=default_url,
-                    interval=MONITOR_INTERVAL,
-                    maxretries=3,
-                    parent=group_id
-                )
-                monitor_id = res.get("monitorId")
+                log_debug(f"Erstelle neuen Uptime Kuma Monitor: {expected_title} mit Notifications: {notifications_dict}")
                 
+                # Bei manchen API2-Versionen wird das notifications-Feld direkt akzeptiert, 
+                # ansonsten fangen wir es ab und nutzen den direkten API-Call als Fallback.
+                try:
+                    res = api.add_monitor(
+                        type=MonitorType.HTTP,
+                        name=expected_title,
+                        url=default_url,
+                        interval=MONITOR_INTERVAL,
+                        maxretries=3,
+                        parent=group_id,
+                        notifications=notifications_dict
+                    )
+                except TypeError:
+                    # Fallback falls 'notifications' im Wrapper nicht als Argument direkt in add_monitor erlaubt ist
+                    res = api.add_monitor(
+                        type=MonitorType.HTTP,
+                        name=expected_title,
+                        url=default_url,
+                        interval=MONITOR_INTERVAL,
+                        maxretries=3,
+                        parent=group_id
+                    )
+                    if notif_id and res.get("monitorId"):
+                        try:
+                            api.add_monitor_notification(notification_id=notif_id, monitor_id=res.get("monitorId"))
+                        except Exception:
+                            pass
+
+                monitor_id = res.get("monitorId")
                 cursor.execute(f"UPDATE devices SET {col_name} = ?, friendly_name = ? WHERE ieee_address = ?", (monitor_id, name, ieee))
                 conn.commit()
                 print(f"Monitor erstellt für {expected_title} (ID: {monitor_id})")
             else:
                 log_debug(f"Aktualisiere bestehenden Uptime Kuma Monitor ID {monitor_id}: {expected_title}")
-                api.edit_monitor(
-                    id=monitor_id,
-                    type=MonitorType.HTTP,
-                    name=expected_title,
-                    interval=MONITOR_INTERVAL,
-                    parent=group_id
-                )
+                try:
+                    api.edit_monitor(
+                        id=monitor_id,
+                        type=MonitorType.HTTP,
+                        name=expected_title,
+                        interval=MONITOR_INTERVAL,
+                        parent=group_id,
+                        notifications=notifications_dict
+                    )
+                except TypeError:
+                    api.edit_monitor(
+                        id=monitor_id,
+                        type=MonitorType.HTTP,
+                        name=expected_title,
+                        interval=MONITOR_INTERVAL,
+                        parent=group_id
+                    )
+                    if notif_id:
+                        try:
+                            api.add_monitor_notification(notification_id=notif_id, monitor_id=monitor_id)
+                        except Exception:
+                            pass
+
                 cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
                 conn.commit()
             
-            # Benachrichtigungs-Kanal dem Monitor zuweisen, falls in Uptime Kuma v2 API unterstützt
-            if notif_id and monitor_id:
-                try:
-                    api.add_monitor_notification(notification_id=notif_id, monitor_id=monitor_id)
-                    log_debug(f"Benachrichtigung ID {notif_id} für Monitor ID {monitor_id} aktiviert.")
-                except Exception as notif_err:
-                    log_debug(f"Konnte Benachrichtigung nicht direkt zuweisen: {notif_err}")
-
             time.sleep(1.0)
             
     except Exception as e:
