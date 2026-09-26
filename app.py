@@ -199,22 +199,34 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                 cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
                 conn.commit()
 
-           # --- ZUVERLÄSSIGE BENACHRICHTIGUNGS-AKTIVIERUNG ÜBER SOCKET.IO ---
+           # --- DIREKTER REST-CALL ZUR BENACHRICHTIGUNGS-ZUWEISUNG ---
             if notif_id and monitor_id:
-                print(f"[DIAGNOSE-NOTIF] Verknüpfe Benachrichtigung Kanal {notif_id} mit Monitor {monitor_id}...", flush=True)
+                print(f"[DIAGNOSE-NOTIF] Setze Benachrichtigung via REST-Session für Monitor {monitor_id}...", flush=True)
                 try:
-                    # Uptime Kuma nutzt intern den Socket.io Event-Call 'addMonitorNotification'
-                    if hasattr(api, "sio") and api.sio:
+                    # Die API-Bibliothek hält eine authentifizierte requests-Session vor
+                    if hasattr(api, "session") and api.session:
+                        base_url = UPTIME_KUMA_URL.rstrip("/")
+                        
+                        # In Uptime Kuma v2 erfolgt die Zuweisung über die Monitor-Bearbeitung oder den spezifischen Endpoint
+                        # Wir versuchen den Monitor-Endpunkt mit dem aktualisierten notifications-Dictionary anzusprechen
                         payload = {
-                            "monitorId": monitor_id,
-                            "notificationId": notif_id
+                            "id": monitor_id,
+                            "type": "http",
+                            "name": expected_title,
+                            "url": default_url,
+                            "interval": MONITOR_INTERVAL,
+                            "parent": group_id,
+                            "notifications": {str(notif_id): True}
                         }
-                        sio_res = api.sio.call("addMonitorNotification", payload, timeout=3.0)
-                        print(f"[DIAGNOSE-NOTIF] Socket.io 'addMonitorNotification' erfolgreich: {sio_res}", flush=True)
+                        
+                        # Direkter POST/PUT an die REST-Schnittstelle (falls die Session /api/v1 oder Socket-Tunnel nutzt)
+                        # Da uptime-kuma-api intern Socket.io nutzt, können wir auch die Session für den REST-Kanal verwenden:
+                        response = api.session.post(f"{base_url}/api/monitor", json=payload)
+                        print(f"[DIAGNOSE-NOTIF] REST-Antwort: Status {response.status_code}, Body: {response.text}", flush=True)
                     else:
-                        print(f"[DIAGNOSE-NOTIF] api.sio nicht verfügbar.", flush=True)
-                except Exception as notif_err:
-                    print(f"[DIAGNOSE-NOTIF] Benachrichtigungs-Verknüpfung Hinweis: {notif_err}", flush=True)
+                        print(f"[DIAGNOSE-NOTIF] Keine api.session verfügbar.", flush=True)
+                except Exception as rest_err:
+                    print(f"[DIAGNOSE-NOTIF] REST-Call Fehler: {rest_err}", flush=True)
 
     except Exception as e:
         print(f"[DIAGNOSE-CRITICAL] Fehler in sync_monitor_with_kuma: {e}", flush=True)
