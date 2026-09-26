@@ -199,38 +199,29 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                 cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
                 conn.commit()
 
-           # --- DIREKTE BENACHRICHTIGUNGS-ZUWEISUNG PER SEPARATEM REST-REQUEST ---
+            # --- BENACHRICHTIGUNGS-ZUWEISUNG ÜBER DIE AKTIVE API-SOCKET-VERBINDUNG ---
             if notif_id and monitor_id:
-                print(f"[DIAGNOSE-NOTIF] Setze Benachrichtigung via direktem REST-Request für Monitor {monitor_id}...", flush=True)
+                print(f"[DIAGNOSE-NOTIF] Setze Benachrichtigung via aktivem API-Socket für Monitor {monitor_id}...", flush=True)
                 try:
-                    session = requests.Session()
-                    base_url = UPTIME_KUMA_URL.rstrip("/")
-                    
-                    # 1. Login bei der Uptime Kuma REST-API
-                    login_res = session.post(f"{base_url}/api/login", json={
-                        "username": UK_USER,
-                        "password": UK_PASS
-                    }, timeout=5)
-                    
-                    if login_res.status_code == 200:
-                        # 2. Monitor-Daten per PUT/POST aktualisieren inklusive des notifications-Dictionaries
-                        payload = {
+                    # Die uptime-kuma-api hat eine Methode oder wir nutzen den sio-Client direkt
+                    if hasattr(api, "sio") and api.sio:
+                        # Uptime Kuma v2 erwartet beim 'edit'-Event ein Monitor-Objekt mit dem Feld 'notifications'
+                        edit_data = {
                             "id": monitor_id,
                             "type": "http",
                             "name": expected_title,
                             "url": default_url,
                             "interval": MONITOR_INTERVAL,
                             "parent": group_id,
-                            "notifications": {str(notif_id): True}
+                            "notifications": {
+                                str(notif_id): True
+                            }
                         }
-                        
-                        # Uptime Kuma v2 nutzt standardmäßig POST für das Editieren von Monitoren über die REST-API
-                        edit_res = session.post(f"{base_url}/api/monitor", json=payload, timeout=5)
-                        print(f"[DIAGNOSE-NOTIF] REST Edit Antwort: Status {edit_res.status_code}, Body: {edit_res.text}", flush=True)
-                    else:
-                        print(f"[DIAGNOSE-NOTIF] REST-Login fehlgeschlagen: Status {login_res.status_code}", flush=True)
-                except Exception as rest_err:
-                    print(f"[DIAGNOSE-NOTIF] Fehler beim direkten REST-Call: {rest_err}", flush=True)
+                        # Wir rufen das Socket-Event 'edit' mit einer kurzen Wartezeit auf
+                        api.sio.call("edit", edit_data, timeout=3.0)
+                        print(f"[DIAGNOSE-NOTIF] Socket-Edit mit Notifications erfolgreich gesendet!", flush=True)
+                except Exception as sio_ex:
+                    print(f"[DIAGNOSE-NOTIF] Socket-Edit Hinweis: {sio_ex}", flush=True)
 
     except Exception as e:
         print(f"[DIAGNOSE-CRITICAL] Fehler in sync_monitor_with_kuma: {e}", flush=True)
