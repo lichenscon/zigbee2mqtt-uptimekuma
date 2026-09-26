@@ -61,24 +61,38 @@ init_db()
 
 # --- Uptime Kuma v2 API Hilfsfunktionen ---
 def get_or_create_group(api, group_name):
-    """Sucht oder erstellt einen Uptime Kuma Gruppen-Monitor (Typ 'group') für einklappbare Seitenleisten-Ordner."""
+    """Sucht oder erstellt einen Uptime Kuma Gruppen-Monitor und fängt die echte ID ab."""
     try:
         monitors = api.get_monitors()
         for m in monitors:
             if m.get("name") == group_name and m.get("type") == "group":
-                log_debug(f"Gruppe '{group_name}' gefunden mit ID {m.get('id')}")
+                print(f"[DEBUG] Gruppe '{group_name}' gefunden mit ID {m.get('id')}", flush=True)
                 return m.get("id")
         
-        log_debug(f"Gruppe '{group_name}' existiert nicht. Erstelle neuen Gruppen-Monitor...")
-        res = api.add_monitor(
-            type=MonitorType.GROUP,
-            name=group_name
-        )
-        group_id = res.get("monitorId")
-        log_debug(f"Gruppe '{group_name}' erfolgreich erstellt mit ID {group_id}")
+        print(f"[DEBUG] Gruppe '{group_name}' existiert nicht. Erstelle neuen Gruppen-Monitor...", flush=True)
+        # Wir übergeben ein Dictionary für den add-Befehl
+        payload = {
+            "type": "group",
+            "name": group_name
+        }
+        res = api.add_monitor(**payload)
+        print(f"[DEBUG] Rohe add_monitor Antwort für Gruppe '{group_name}': {res}", flush=True)
+        
+        # ID aus allen möglichen Schlüsseln herausfischen
+        group_id = res.get("monitorId") or res.get("id") or (res.get("bean") and res.get("bean").get("id"))
+        
+        # Falls immer noch None, holen wir uns die Liste der Monitore neu und suchen nach dem Namen
+        if not group_id:
+            monitors = api.get_monitors()
+            for m in monitors:
+                if m.get("name") == group_name and m.get("type") == "group":
+                    group_id = m.get("id")
+                    break
+                    
+        print(f"[DEBUG] Ermittelte Group-ID für '{group_name}': {group_id}", flush=True)
         return group_id
     except Exception as e:
-        print(f"Fehler beim Verwalten der Gruppe {group_name}: {e}")
+        print(f"[DIAGNOSE-FEHLER] Gruppe erstellen fehlgeschlagen: {e}", flush=True)
         return None
 
 def get_notification_id(api, notif_name):
@@ -105,7 +119,7 @@ def get_notification_id(api, notif_name):
     return None
 
 def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id=None, cached_notif_id=None):
-    """Diagnose-Version zum Aufdecken des exakten Fehlers bei der Benachrichtigungs-Zuweisung."""
+    """Erstellt oder aktualisiert einen Monitor und erzwingt die Benachrichtigung über die Rohdaten."""
     if not UK_USER or not UK_PASS:
         print("[DIAGNOSE] Keine Uptime Kuma Zugangsdaten hinterlegt, Sync übersprungen.", flush=True)
         return None
@@ -133,75 +147,103 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
     default_url = f"{app_host_url}/api/device/{ieee}/{endpoint_type}"
 
     try:
-        print(f"[DIAGNOSE] Verbinde mit Uptime Kuma für: {expected_title}...")
+        print(f"[DIAGNOSE] Verbinde mit Uptime Kuma für: {expected_title}...", flush=True)
         with UptimeKumaApi(UPTIME_KUMA_URL) as api:
             api.login(UK_USER, UK_PASS)
-            print(f"[DIAGNOSE] Login erfolgreich.")
             
             group_id = cached_group_id if cached_group_id else get_or_create_group(api, group_name)
             notif_id = cached_notif_id if cached_notif_id else get_notification_id(api, NOTIFICATION_NAME)
             print(f"[DIAGNOSE] group_id={group_id}, notif_id={notif_id}", flush=True)
 
+            # Notifications-Dict vorbereiten (z.B. {"1": True})
+            notifications_dict = {str(notif_id): True} if notif_id else {}
+
             if not monitor_id:
-                print(f"[DIAGNOSE] Erstelle Monitor...")
-                res = api.add_monitor(
-                    type=MonitorType.HTTP,
-                    name=expected_title,
-                    url=default_url,
-                    interval=MONITOR_INTERVAL,
-                    maxretries=3,
-                    parent=group_id
-                )
-                monitor_id = res.get("monitorId") or res.get("id")
-                print(f"[DIAGNOSE] Monitor erstellt mit ID: {monitor_id}", flush=True)
+                print(f"[DIAGNOSE] Erstelle Monitor mit Payload...", flush=True)
                 
-                cursor.execute(f"UPDATE devices SET {col_name} = ?, friendly_name = ? WHERE ieee_address = ?", (monitor_id, name, ieee))
-                conn.commit()
+                # Wir bauen das Monitor-Objekt direkt für den Socket.io/API-Call zusammen,
+                # damit das notifications-Feld garantiert übertragen wird.
+                monitor_data = {
+                    "type": "http",
+                    "name": expected_title,
+                    "url": default_url,
+                    "interval": MONITOR_INTERVAL,
+                    "maxretries": 3,
+                    "parent": group_id,
+                    "notifications": notifications_dict
+                }
+                
+                # Versuch über add_monitor mit kwargs oder direktem sio-Call falls unterstützt
+                try:
+                    res = api.add_monitor(**monitor_data)
+                except TypeError:
+                    # Fallback ohne notifications, falls der Wrapper blockiert
+                    monitor_data.pop("notifications", None)
+                    res = api.add_monitor(**monitor_data)
+                
+                print(f"[DEBUG] Rohe add_monitor Antwort für '{expected_title}': {res}", flush=True)
+                
+                monitor_id = res.get("monitorId") or res.get("id")
+                
+                # Falls ID immer noch None ist, über get_monitors suchen
+                if not monitor_id:
+                    monitors = api.get_monitors()
+                    target = next((m for m in monitors if m.get("name") == expected_title), None)
+                    if target:
+                        monitor_id = target.get("id")
+
+                print(f"[DIAGNOSE] Ermittelte Monitor-ID: {monitor_id}", flush=True)
+                
+                if monitor_id:
+                    cursor.execute(f"UPDATE devices SET {col_name} = ?, friendly_name = ? WHERE ieee_address = ?", (monitor_id, name, ieee))
+                    conn.commit()
+                    
+                    # Wenn notifications beim add_monitor wegen dem Wrapper fehlgeschlagen haben sollten, 
+                    # injizieren wir sie jetzt per rohem sio.call wenn möglich oder edit_monitor:
+                    if notif_id and hasattr(api, "sio"):
+                        try:
+                            monitors = api.get_monitors()
+                            target = next((m for m in monitors if m.get("id") == monitor_id), None)
+                            if target:
+                                target["notifications"] = notifications_dict
+                                sio_res = api.sio.call("edit", target)
+                                print(f"[DIAGNOSE] Sio.call 'edit' Ergebnis für Notifications: {sio_res}", flush=True)
+                        except Exception as sio_err:
+                            print(f"[DIAGNOSE] Sio.call Fehler: {sio_err}", flush=True)
+
             else:
                 print(f"[DIAGNOSE] Editiere bestehenden Monitor ID: {monitor_id}...", flush=True)
-                api.edit_monitor(
-                    id=monitor_id,
-                    type=MonitorType.HTTP,
-                    name=expected_title,
-                    interval=MONITOR_INTERVAL,
-                    parent=group_id
-                )
-                cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
-                conn.commit()
-
-            # --- EXPERIMENTELLER DIREKT-CALL ÜBER SOCKET.IO ---
-            if notif_id and monitor_id:
-                print(f"[DIAGNOSE] Versuche direkte Benachrichtigungs-Injektion für Monitor {monitor_id} und Notification {notif_id}...", flush=True)
                 try:
-                    # Da python-socketio im Hintergrund läuft, holen wir uns das rohe Objekt oder nutzen den Socket-Call direkt wenn möglich
-                    # Wir prüfen hier, ob die API eine edit_monitor Funktion mit notifications-Dict im Raw-Mode anbietet
-                    # Alternativ testen wir den direkten Socket.io-Aufruf, falls api.sio existiert:
-                    if hasattr(api, "sio"):
-                        print(f"[DIAGNOSE] api.sio ist verfügbar. Sende Test-Payload...", flush=True)
-                        # Uptime Kuma v2 Event zum Bearbeiten eines Monitors erwartet ein spezifisches Payload-Objekt
-                        # Wir fragen erst die aktuellen Details ab:
+                    api.edit_monitor(
+                        id=monitor_id,
+                        type=MonitorType.HTTP,
+                        name=expected_title,
+                        interval=MONITOR_INTERVAL,
+                        parent=group_id,
+                        notifications=notifications_dict
+                    )
+                except TypeError:
+                    api.edit_monitor(
+                        id=monitor_id,
+                        type=MonitorType.HTTP,
+                        name=expected_title,
+                        interval=MONITOR_INTERVAL,
+                        parent=group_id
+                    )
+                    if notif_id and hasattr(api, "sio"):
                         monitors = api.get_monitors()
                         target = next((m for m in monitors if m.get("id") == monitor_id), None)
                         if target:
-                            print(f"[DIAGNOSE] Ursprüngliches Monitor-Objekt von Uptime Kuma: {target}", flush=True)
-                            target["notifications"] = {str(notif_id): True}
-                            
-                            # Wir versuchen den rohen Socket.io call 'edit' abzusetzen
-                            sio_res = api.sio.call("edit", target)
-                            print(f"[DIAGNOSE] Rohe Socket.io 'edit' Antwort: {sio_res}", flush=True)
-                        else:
-                            print(f"[DIAGNOSE] Konnte Monitor ID {monitor_id} via get_monitors() nicht finden!", flush=True)
-                    else:
-                        print(f"[DIAGNOSE] api.sio ist in dieser Wrapper-Version nicht direkt zugänglich.", flush=True)
-                except Exception as raw_err:
-                    print(f"[DIAGNOSE-FEHLER] Raw-Injektion fehlgeschlagen: {raw_err}", flush=True)
-                    import traceback
-                    traceback.print_exc()
+                            target["notifications"] = notifications_dict
+                            api.sio.call("edit", target)
+
+                cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
+                conn.commit()
 
             time.sleep(1.0)
             
     except Exception as e:
-        print(f"[DIAGNOSE-CRITICAL] Schwerwiegender Fehler in sync_monitor_with_kuma: {e}", flush=True)
+        print(f"[DIAGNOSE-CRITICAL] Fehler in sync_monitor_with_kuma: {e}", flush=True)
         import traceback
         traceback.print_exc()
     
