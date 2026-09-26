@@ -161,9 +161,10 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
             # Wichtig: Uptime Kuma v2 erwartet Keys als Strings im Dictionary (z.B. {"1": True})
             notifications_dict = {str(notif_id): True} if notif_id else {}
 
-
             if not monitor_id:
                 print(f"[DIAGNOSE] Erstelle Monitor mit Payload...", flush=True)
+                
+                # Wir übergeben die Notifications direkt im add_monitor Dictionary
                 monitor_data = {
                     "type": "http",
                     "name": expected_title,
@@ -174,13 +175,9 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                     "notifications": notifications_dict
                 }
                 
-                try:
-                    res = api.add_monitor(**monitor_data)
-                except TypeError:
-                    monitor_data.pop("notifications", None)
-                    res = api.add_monitor(**monitor_data)
-                
+                res = api.add_monitor(**monitor_data)
                 print(f"[DEBUG] Rohe add_monitor Antwort für '{expected_title}': {res}", flush=True)
+                
                 monitor_id = res.get("monitorID") or res.get("monitorId") or res.get("id")
                 print(f"[DIAGNOSE] Ermittelte Monitor-ID: {monitor_id}", flush=True)
                 
@@ -204,33 +201,33 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                 cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
                 conn.commit()
 
-            # --- EXPLIZITE BENACHRICHTIGUNGS-AKTIVIERUNG (GARANTIERT) ---
-            # --- BENACHRICHTIGUNGS-AKTIVIERUNG (GETRENNT & ÜBERWACHT) ---
-            # --- BENACHRICHTIGUNGS-AKTIVIERUNG (ÜBER SICHEREN EDIT-CALL) ---
-            # --- BENACHRICHTIGUNGS-AKTIVIERUNG (ROHER SOCKET.IO CALL MIT TIMEOUT) ---
+            # --- VERBESSERTER SOCKET.IO CALL MIT VOLLSTÄNDIGEM PAYLOAD ---
             if notif_id and monitor_id:
                 print(f"[DIAGNOSE-NOTIF] Sende rohes Socket.io Edit-Event für Monitor {monitor_id}...", flush=True)
                 try:
                     if hasattr(api, "sio") and api.sio:
+                        # Wir übergeben ein vollständiges Monitor-Objekt, damit der Server es nicht verwirft
                         edit_payload = {
                             "id": monitor_id,
                             "type": "http",
                             "name": expected_title,
                             "url": default_url,
                             "interval": MONITOR_INTERVAL,
+                            "retryInterval": 60,
+                            "maxretries": 3,
                             "parent": group_id,
+                            "ignoreTls": False,
+                            "upsideDown": False,
                             "notifications": {str(notif_id): True}
                         }
-                        # Timeout von 3 Sekunden, damit es niemals blockiert
                         sio_res = api.sio.call("edit", edit_payload, timeout=3.0)
                         print(f"[DIAGNOSE-NOTIF] Socket.io 'edit' erfolgreich! Antwort: {sio_res}", flush=True)
                     else:
                         print(f"[DIAGNOSE-NOTIF] api.sio nicht verfügbar.", flush=True)
                 except Exception as sio_err:
-                    print(f"[DIAGNOSE-NOTIF] Socket.io Call Hinweis/Fehler (nicht kritisch): {sio_err}", flush=True)
-
-            time.sleep(1.0)
-
+                    # Hier geben wir jetzt die echte Exception aus statt sie nur stumm abzufangen
+                    print(f"[DIAGNOSE-NOTIF] Socket.io Call Exception: {type(sio_err).__name__}: {sio_err}", flush=True)
+            
     except Exception as e:
         print(f"[DIAGNOSE-CRITICAL] Fehler in sync_monitor_with_kuma: {e}", flush=True)
         import traceback
