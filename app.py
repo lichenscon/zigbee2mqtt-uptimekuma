@@ -66,12 +66,23 @@ def connect():
     if UK_USER and UK_PASS:
         try:
             log_debug(f"Versuche Uptime Kuma Login mit Benutzer: {UK_USER}")
-            sio.call("login", {"username": UK_USER, "password": UK_PASS})
-            print("Uptime Kuma Login erfolgreich.")
-            uk_connected.set()
+            # Uptime Kuma erwartet für den Login oft ein Dictionary mit token oder user/pass
+            response = sio.call("login", {"username": UK_USER, "password": UK_PASS}, timeout=10)
+            log_debug(f"Uptime Kuma Login Antwort: {response}")
+            
+            # Manchmal gibt Kuma ein Dictionary mit {"ok": true} zurück
+            if isinstance(response, dict) and response.get("ok") == False:
+                print(f"Uptime Kuma Login vom Server abgelehnt: {response.get('msg', 'Unbekannter Fehler')}")
+            else:
+                print("Uptime Kuma Login erfolgreich.")
+                uk_connected.set()
         except Exception as e:
-            print(f"Uptime Kuma Login fehlgeschlagen: {e}")
+            print(f"Uptime Kuma Login fehlgeschlagen (Timeout oder Fehler): {e}")
+            # Optional: Falls kein Login zwingend nötig ist oder du testen willst, 
+            # ob der Sync ohne Login klappt, kannst du uk_connected.set() hier testweise setzen:
+            # uk_connected.set()
     else:
+        print("Keine Uptime Kuma Zugangsdaten hinterlegt, überspringe Login.")
         uk_connected.set()
 
 @sio.event
