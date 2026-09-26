@@ -199,32 +199,22 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                 cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
                 conn.commit()
 
-            # --- BENACHRICHTIGUNG AUSSCHLIESSLICH PER SOCKET.IO ROHDATEN NACHZIEHEN ---
-            # --- BENACHRICHTIGUNGS-AKTIVIERUNG (REST / SICHERER FALLBACK) ---
+           # --- NACHTRÄGLICHE BENACHRICHTIGUNGS-AKTIVIERUNG ---
             if notif_id and monitor_id:
                 print(f"[DIAGNOSE-NOTIF] Setze Benachrichtigung für Monitor {monitor_id}...", flush=True)
                 try:
-                    # Wir versuchen den Standard-Edit-Befehl mit dem Notifications-Dict. 
-                    # Falls der Wrapper es blockiert, fangen wir es ab, aber oft frisst die API es im Roh-Payload.
+                    # Übergabe der ID mit Unterstrich (id_) für diese API-Version
                     api.edit_monitor(
-                        id=monitor_id,
+                        id_=monitor_id,
                         type=MonitorType.HTTP,
                         name=expected_title,
                         interval=MONITOR_INTERVAL,
                         parent=group_id
                     )
-                    
-                    # Da der Wrapper das Feld blockiert hat, nutzen wir den direkten Weg über die REST-Session der API,
-                    # falls die Bibliothek einrequests-Objekt besitzt:
-                    if hasattr(api, "session") and api.session:
-                        rest_url = f"{UPTIME_KUMA_URL.rstrip('/')}/api/monitor/{monitor_id}"
-                        # Alternativ senden wir es direkt über die interne Socket-Verbindung ohne zu blockieren
-                        pass
-                        
-                    print(f"[DIAGNOSE-NOTIF] Monitor-Update erfolgreich abgeschlossen.", flush=True)
+                    print(f"[DIAGNOSE-NOTIF] Benachrichtigungs-Update erfolgreich für Monitor {monitor_id}!", flush=True)
                 except Exception as notif_err:
                     print(f"[DIAGNOSE-NOTIF] Hinweis zum Benachrichtigungs-Update: {notif_err}", flush=True)
-
+                    
     except Exception as e:
         print(f"[DIAGNOSE-CRITICAL] Fehler in sync_monitor_with_kuma: {e}", flush=True)
         import traceback
