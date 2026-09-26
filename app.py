@@ -82,18 +82,26 @@ def get_or_create_group(api, group_name):
         return None
 
 def get_notification_id(api, notif_name):
-    """Sucht die ID des konfigurierten Benachrichtigungs-Kanals anhand des Namens."""
+    """Sucht die ID des konfigurierten Benachrichtigungs-Kanals anhand des Namens und loggt alle verfügbaren."""
     if not notif_name:
+        print("[DEBUG] NOTIFICATION_NAME ist leer oder nicht konfiguriert. Keine Benachrichtigungen werden verknüpft.")
         return None
     try:
+        print(f"[DEBUG] Frage verfügbare Benachrichtigungs-Kanäle von Uptime Kuma ab (gesucht: '{notif_name}')...")
         notifications = api.get_notifications()
+        print(f"[DEBUG] Von Uptime Kuma empfangene Benachrichtigungen: {notifications}")
+        
         for n in notifications:
-            if n.get("name") == notif_name:
-                log_debug(f"Benachrichtigungs-Kanal '{notif_name}' gefunden mit ID {n.get('id')}")
-                return n.get("id")
-        log_debug(f"Warnung: Benachrichtigungs-Kanal '{notif_name}' wurde in Uptime Kuma nicht gefunden.")
+            # Uptime Kuma API gibt den Namen meist im Feld 'name' zurück
+            n_name = n.get("name")
+            n_id = n.get("id")
+            if n_name and n_name.lower() == notif_name.lower():
+                print(f"[DEBUG] Benachrichtigungs-Kanal '{n_name}' erfolgreich erkannt mit ID {n_id}")
+                return n_id
+                
+        print(f"[DEBUG] ACHTUNG: Benachrichtigungs-Kanal '{notif_name}' wurde in Uptime Kuma nicht gefunden! Prüfe den Namen.")
     except Exception as e:
-        print(f"Fehler beim Abrufen der Benachrichtigungen: {e}")
+        print(f"[DEBUG] Fehler beim Abrufen der Benachrichtigungen von Uptime Kuma: {e}")
     return None
 
 def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id=None, cached_notif_id=None):
