@@ -110,12 +110,21 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False):
     row = cursor.fetchone()
     
     monitor_id = row[0] if row else None
+    db_friendly_name = row[1] if row else None
+    
+    # Optimierung: Wenn der Monitor bereits existiert und sich der Name nicht geändert hat,
+    # sparen wir uns den API-Aufruf komplett, um das Rate-Limit (Too frequently) zu umgehen!
+    expected_title = f"{name} (Batterie)" if is_battery_monitor else f"{name} (Online)"
+    if monitor_id and db_friendly_name == name:
+        log_debug(f"Monitor für '{expected_title}' unverändert. Sync übersprungen.")
+        conn.close()
+        return monitor_id
+
     group_name = BATTERY_GROUP_NAME if is_battery_monitor else ONLINE_GROUP_NAME
     
     app_host_url = os.getenv("PUBLIC_APP_URL", "http://localhost:5000")
     endpoint_type = "battery" if is_battery_monitor else "online"
     default_url = f"{app_host_url}/api/device/{ieee}/{endpoint_type}"
-    monitor_title = f"{name} (Batterie)" if is_battery_monitor else f"{name} (Online)"
 
     try:
         with UptimeKumaApi(UPTIME_KUMA_URL) as api:
@@ -123,15 +132,13 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False):
             
             group_id = get_or_create_group(api, group_name)
             notif_id = get_notification_id(api, NOTIFICATION_NAME)
-            
-            # Benachrichtigungs-Zuordnung aufbauen falls vorhanden
             notifications_dict = {str(notif_id): True} if notif_id else {}
 
             if not monitor_id:
-                log_debug(f"Erstelle neuen Uptime Kuma Monitor: {monitor_title}")
+                log_debug(f"Erstelle neuen Uptime Kuma Monitor: {expected_title}")
                 res = api.add_monitor(
                     type=MonitorType.HTTP,
-                    name=monitor_title,
+                    name=expected_title,
                     url=default_url,
                     interval=MONITOR_INTERVAL,
                     retry_interval=MONITOR_INTERVAL,
@@ -141,22 +148,28 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False):
                 )
                 monitor_id = res.get("monitorId")
                 
-                cursor.execute(f"UPDATE devices SET {col_name} = ? WHERE ieee_address = ?", (monitor_id, ieee))
+                cursor.execute(f"UPDATE devices SET {col_name} = ?, friendly_name = ? WHERE ieee_address = ?", (monitor_id, name, ieee))
                 conn.commit()
-                print(f"Monitor erstellt für {monitor_title} (ID: {monitor_id}, Gruppe-ID: {group_id})")
+                print(f"Monitor erstellt für {expected_title} (ID: {monitor_id})")
             else:
-                log_debug(f"Aktualisiere bestehenden Uptime Kuma Monitor ID {monitor_id}: {monitor_title}")
+                log_debug(f"Aktualisiere bestehenden Uptime Kuma Monitor ID {monitor_id}: {expected_title}")
                 api.edit_monitor(
                     id=monitor_id,
                     type=MonitorType.HTTP,
-                    name=monitor_title,
+                    name=expected_title,
                     interval=MONITOR_INTERVAL,
                     retry_interval=MONITOR_INTERVAL,
                     parent=group_id,
                     notifications=notifications_dict
                 )
+                cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
+                conn.commit()
+            
+            # Wichtig: Kurze Pause, um Uptime Kuma nicht mit API-Calls zu fluten
+            time.sleep(0.5)
+            
     except Exception as e:
-        print(f"Fehler beim Sync mit Uptime Kuma für {monitor_title}: {e}")
+        print(f"Fehler beim Sync mit Uptime Kuma für {expected_title}: {e}")
     
     conn.close()
     return monitor_id
