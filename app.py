@@ -162,9 +162,7 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
             notifications_dict = {str(notif_id): True} if notif_id else {}
 
             if not monitor_id:
-                print(f"[DIAGNOSE] Erstelle Monitor (ohne Notifications-Parameter im Wrapper)...", flush=True)
-                
-                # Ohne 'notifications' im Dictionary schlägt der Wrapper-Check nicht fehl
+                print(f"[DIAGNOSE] Erstelle Monitor...", flush=True)
                 monitor_data = {
                     "type": "http",
                     "name": expected_title,
@@ -186,13 +184,15 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
             else:
                 print(f"[DIAGNOSE] Editiere bestehenden Monitor ID: {monitor_id}...", flush=True)
                 try:
+                    # Korrekter Parameter in dieser Bibliotheks-Version ist 'id_' (mit Unterstrich)
                     api.edit_monitor(
-                        id=monitor_id,
+                        id_=monitor_id,
                         type=MonitorType.HTTP,
                         name=expected_title,
                         interval=MONITOR_INTERVAL,
                         parent=group_id
                     )
+                    print(f"[DIAGNOSE-NOTIF] Monitor erfolgreich editiert.", flush=True)
                 except Exception as e:
                     print(f"[DIAGNOSE] edit_monitor Hinweis: {e}", flush=True)
 
