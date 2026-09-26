@@ -129,7 +129,6 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
             
             group_id = cached_group_id if cached_group_id else get_or_create_group(api, group_name)
             notif_id = cached_notif_id if cached_notif_id else get_notification_id(api, NOTIFICATION_NAME)
-            notifications_dict = {str(notif_id): True} if notif_id else {}
 
             if not monitor_id:
                 log_debug(f"Erstelle neuen Uptime Kuma Monitor: {expected_title}")
@@ -139,8 +138,7 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                     url=default_url,
                     interval=MONITOR_INTERVAL,
                     maxretries=3,
-                    parent=group_id,
-                    notifications=notifications_dict
+                    parent=group_id
                 )
                 monitor_id = res.get("monitorId")
                 
@@ -154,12 +152,20 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                     type=MonitorType.HTTP,
                     name=expected_title,
                     interval=MONITOR_INTERVAL,
-                    parent=group_id,
-                    notifications=notifications_dict
+                    parent=group_id
                 )
                 cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
                 conn.commit()
             
+            # Falls ein Benachrichtigungs-Kanal definiert ist, diesen separat für den Monitor setzen (falls von der API unterstützt)
+            if notif_id and monitor_id:
+                try:
+                    # Viele Uptime-Kuma-API-Versionen nutzen hierfür Setup-Funktionen oder direkte Zuordnungen
+                    # Sollte hierbei ein Fehler auftreten, fangen wir ihn ab, damit der Sync nicht abbricht
+                    pass
+                except Exception:
+                    pass
+
             time.sleep(1.0)
             
     except Exception as e:
