@@ -116,7 +116,6 @@ def set_notification_default_status(api, notif_id, make_default=True):
         for n in notifications:
             if n.get("id") == notif_id:
                 n["isDefault"] = make_default
-                # ID explizit als id_ übergeben und aus dem Payload entfernen, um Kollisionen zu vermeiden
                 n.pop("id", None)
                 api.edit_notification(id_=notif_id, **n)
                 print(f"[DEBUG] Benachrichtigung ID {notif_id} ('{n.get('name')}') isDefault auf {make_default} gesetzt.", flush=True)
@@ -241,14 +240,24 @@ def on_message(client, userdata, msg):
                 try:
                     with UptimeKumaApi(UPTIME_KUMA_URL) as api:
                         api.login(UK_USER, UK_PASS)
-                        cached_online_group = get_or_create_group(api, ONLINE_GROUP_NAME)
-                        cached_battery_group = get_or_create_group(api, BATTERY_GROUP_NAME)
-                        cached_notif_id = get_notification_id(api, NOTIFICATION_NAME)
                         
-                        if cached_notif_id:
-                            set_notification_default_status(api, cached_notif_id, make_default=True)
+                        try:
+                            cached_online_group = get_or_create_group(api, ONLINE_GROUP_NAME)
+                            cached_battery_group = get_or_create_group(api, BATTERY_GROUP_NAME)
+                        except Exception as group_err:
+                            print(f"[FEHLER] Konnte Gruppen nicht laden: {group_err}", flush=True)
+
+                        try:
+                            cached_notif_id = get_notification_id(api, NOTIFICATION_NAME)
+                            if cached_notif_id:
+                                set_notification_default_status(api, cached_notif_id, make_default=True)
+                            else:
+                                print(f"[WARNUNG] Benachrichtigung '{NOTIFICATION_NAME}' wurde nicht gefunden!", flush=True)
+                        except Exception as notif_err:
+                            print(f"[FEHLER] Konnte Benachrichtigungs-Default nicht setzen: {notif_err}", flush=True)
+                            
                 except Exception as e:
-                    print(f"Konnte Uptime Kuma Gruppen/Benachrichtigungen nicht vorab laden: {e}")
+                    print(f"Konnte Uptime Kuma Verbindung nicht herstellen: {e}")
 
             for d in devices:
                 if d.get("type") == "Coordinator":
