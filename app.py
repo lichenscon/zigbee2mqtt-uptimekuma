@@ -5,6 +5,7 @@ import time
 import json
 import requests
 import socketio
+import paho.mqtt.client as mqtt
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
@@ -25,11 +26,13 @@ ONLINE_GROUP_NAME = os.getenv("ONLINE_GROUP_NAME", "Zigbee Online Status")
 BATTERY_GROUP_NAME = os.getenv("BATTERY_GROUP_NAME", "Zigbee Batteriestand")
 BATTERY_THRESHOLD = int(os.getenv("BATTERY_THRESHOLD", 20))
 
+DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
+
 DB_PATH = "/app/data/devices.db"
 
-# Globaler Cache für Gerätedaten
-devices_cache = {}
-cache_lock = threading.Lock()
+def log_debug(msg):
+    if DEBUG:
+        print(f"[DEBUG] {msg}")
 
 # --- SQLite Setup ---
 def init_db():
@@ -49,6 +52,7 @@ def init_db():
     """)
     conn.commit()
     conn.close()
+    log_debug("SQLite Datenbank initialisiert.")
 
 init_db()
 
@@ -61,6 +65,7 @@ def connect():
     print("Mit Uptime Kuma verbunden via Socket.io")
     if UK_USER and UK_PASS:
         try:
+            log_debug(f"Versuche Uptime Kuma Login mit Benutzer: {UK_USER}")
             sio.call("login", {"username": UK_USER, "password": UK_PASS})
             print("Uptime Kuma Login erfolgreich.")
             uk_connected.set()
@@ -78,7 +83,8 @@ def connect_uptime_kuma():
     while True:
         try:
             if not sio.connected:
-                sio.connect(UPTIME_KUMA_URL, transports=["websocket"])
+                log_debug(f"Verbinde zu Uptime Kuma unter {UPTIME_KUMA_URL}...")
+                sio.connect(UPTIME_KUMA_URL, transports=["websocket", "polling"])
         except Exception as e:
             print(f"Konnte nicht mit Uptime Kuma verbinden: {e}")
         time.sleep(10)
@@ -86,25 +92,30 @@ def connect_uptime_kuma():
 threading.Thread(target=connect_uptime_kuma, daemon=True).start()
 
 def get_or_create_tag_id(tag_name, color="#00df9a"):
-    """Erstellt oder holt die ID einer Monitor-Gruppe (Tag) in Uptime Kuma."""
     if not uk_connected.is_set():
+        log_debug("Socket.io nicht verbunden, kann Tag nicht abrufen/erstellen.")
         return None
     try:
+        log_debug(f"Frage Tags von Uptime Kuma ab für Gruppe: {tag_name}")
         tags = sio.call("getTags")
         for tag in tags:
             if tag.get("name") == tag_name:
+                log_debug(f"Tag '{tag_name}' gefunden mit ID {tag.get('id')}")
                 return tag.get("id")
         
+        log_debug(f"Tag '{tag_name}' existiert nicht. Erstelle neuen Tag...")
         res = sio.call("addTag", {"name": tag_name, "color": color})
         if res.get("ok"):
-            return res.get("tagID")
+            tag_id = res.get("tagID")
+            log_debug(f"Tag '{tag_name}' erfolgreich erstellt mit ID {tag_id}")
+            return tag_id
     except Exception as e:
         print(f"Fehler beim Verwalten der Gruppe {tag_name}: {e}")
     return None
 
 def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False):
-    """Erstellt oder aktualisiert einen Monitor in Uptime Kuma."""
     if not uk_connected.is_set():
+        log_debug("Socket.io nicht verbunden, Monitor-Sync übersprungen.")
         return None
 
     conn = sqlite3.connect(DB_PATH)
@@ -118,7 +129,7 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False):
     group_name = BATTERY_GROUP_NAME if is_battery_monitor else ONLINE_GROUP_NAME
     tag_id = get_or_create_tag_id(group_name)
     
-    app_host_url = os.getenv("PUBLIC_APP_URL", f"http://localhost:5000")
+    app_host_url = os.getenv("PUBLIC_APP_URL", "http://localhost:5000")
     endpoint_type = "battery" if is_battery_monitor else "online"
     default_url = f"{app_host_url}/api/device/{ieee}/{endpoint_type}"
     
@@ -126,7 +137,7 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False):
 
     try:
         if not monitor_id:
-            # Neuen Monitor erstellen
+            log_debug(f"Erstelle neuen Uptime Kuma Monitor: {monitor_title}")
             payload = {
                 "type": "http",
                 "name": monitor_title,
@@ -143,7 +154,7 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False):
                 conn.commit()
                 print(f"Monitor erstellt für {monitor_title} (ID: {monitor_id})")
         else:
-            # Bestehenden Monitor aktualisieren (Nur Name & Tags anpassen, URL bewahren um manuelle Query-Parameter nicht zu überschreiben)
+            log_debug(f"Aktualisiere bestehenden Uptime Kuma Monitor ID {monitor_id}: {monitor_title}")
             payload = {
                 "id": monitor_id,
                 "type": "http",
@@ -157,9 +168,7 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False):
     conn.close()
     return monitor_id
 
-# --- Zigbee2MQTT / MQTT Integration ---
-import paho.mqtt.client as mqtt
-
+# --- MQTT Integration ---
 def on_connect(client, userdata, flags, rc, properties=None):
     print(f"Verbunden mit MQTT Broker mit Code {rc}")
     client.subscribe(f"{ZIGBEE_TOPIC}/bridge/devices")
@@ -169,9 +178,11 @@ def on_message(client, userdata, msg):
     try:
         topic = msg.topic
         payload_str = msg.payload.decode("utf-8")
+        log_debug(f"MQTT Nachricht empfangen auf Topic: {topic}")
         
         if topic == f"{ZIGBEE_TOPIC}/bridge/devices":
             devices = json.loads(payload_str)
+            log_debug(f"Bridge-Devices empfangen. Anzahl Geräte: {len(devices)}")
             for d in devices:
                 if d.get("type") == "Coordinator":
                     continue
@@ -183,6 +194,7 @@ def on_message(client, userdata, msg):
                         has_battery = 1
                         break
                 
+                log_debug(f"Gerät verarbeitet: IEEE={ieee}, Name={friendly_name}, Batterie={has_battery}")
                 with sqlite3.connect(DB_PATH) as conn:
                     cursor = conn.cursor()
                     cursor.execute("""
@@ -203,6 +215,7 @@ def on_message(client, userdata, msg):
             if len(parts) == 2 and parts[0] == ZIGBEE_TOPIC:
                 dev_name = parts[1]
                 data = json.loads(payload_str)
+                log_debug(f"Gerätestatus empfangen für '{dev_name}': {data}")
                 
                 with sqlite3.connect(DB_PATH) as conn:
                     cursor = conn.cursor()
@@ -213,11 +226,14 @@ def on_message(client, userdata, msg):
                         online = 1 if data.get("linkquality") is not None or data.get("state") is not None else None
                         battery = data.get("battery")
                         
+                        log_debug(f"Aktualisiere DB für IEEE {ieee}: online={online}, battery={battery}")
                         cursor.execute("""
                             UPDATE devices SET online = COALESCE(?, online), battery = COALESCE(?, battery)
                             WHERE ieee_address = ?
                         """, (online, battery, ieee))
                         conn.commit()
+                    else:
+                        log_debug(f"Gerät mit Name '{dev_name}' nicht in DB gefunden.")
 
     except Exception as e:
         print(f"Fehler bei MQTT Nachrichtenverarbeitung: {e}")
@@ -231,6 +247,7 @@ def start_mqtt():
     
     while True:
         try:
+            log_debug(f"Verbinde zu MQTT Broker {MQTT_BROKER}:{MQTT_PORT}...")
             client.connect(MQTT_BROKER, MQTT_PORT, 60)
             client.loop_start()
             break
@@ -244,6 +261,7 @@ threading.Thread(target=start_mqtt, daemon=True).start()
 
 @app.route("/api/device/<ieee>/online", methods=["GET"])
 def check_online(ieee):
+    log_debug(f"HTTP Anfrage /online für IEEE: {ieee}")
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT online, friendly_name FROM devices WHERE ieee_address = ?", (ieee,))
@@ -251,9 +269,11 @@ def check_online(ieee):
     conn.close()
     
     if not row:
+        log_debug(f"Gerät {ieee} nicht gefunden.")
         return jsonify({"error": "Device not found"}), 404
     
     online, name = row
+    log_debug(f"Gerät {name} ({ieee}) Online-Status: {online}")
     if online is None or online == 0:
         return jsonify({"status": "offline", "device": name}), 503
     
@@ -261,6 +281,7 @@ def check_online(ieee):
 
 @app.route("/api/device/<ieee>/battery", methods=["GET"])
 def check_battery(ieee):
+    log_debug(f"HTTP Anfrage /battery für IEEE: {ieee} mit Args: {request.args}")
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT battery, has_battery, friendly_name FROM devices WHERE ieee_address = ?", (ieee,))
@@ -268,25 +289,29 @@ def check_battery(ieee):
     conn.close()
     
     if not row:
+        log_debug(f"Gerät {ieee} nicht gefunden.")
         return jsonify({"error": "Device not found"}), 404
     
     battery, has_battery, name = row
     
     if not has_battery:
+        log_debug(f"Gerät {name} hat keine Batterie.")
         return jsonify({"error": "Device is not battery powered"}), 400
         
     if battery is None:
+        log_debug(f"Für Gerät {name} liegen noch keine Batteriedaten vor.")
         return jsonify({"error": "No battery data available yet"}), 503
     
-    # Schwellenwert aus Query-Parameter ermitteln (überschreibt Standard)
     threshold = BATTERY_THRESHOLD
     threshold_param = request.args.get("threshold")
     if threshold_param is not None:
         try:
             threshold = float(threshold_param)
         except ValueError:
+            log_debug(f"Ungültiger Threshold-Parameter: {threshold_param}")
             return jsonify({"error": "Invalid threshold parameter"}), 400
         
+    log_debug(f"Gerät {name} Batterie: {battery}% (Schwellenwert: {threshold}%)")
     if battery >= threshold:
         return jsonify({"status": "ok", "battery_percent": battery, "threshold_used": threshold, "device": name}), 200
     else:
@@ -297,4 +322,5 @@ def health():
     return jsonify({"status": "healthy"}), 200
 
 if __name__ == "__main__":
+    print(f"Starte Flask-App (Debug-Modus: {DEBUG})...")
     app.run(host="0.0.0.0", port=5000)
