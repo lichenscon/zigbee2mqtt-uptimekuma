@@ -90,23 +90,23 @@ def get_or_create_group(api, group_name):
 def get_notification_id(api, notif_name):
     """Sucht die ID des konfigurierten Benachrichtigungs-Kanals anhand des Namens."""
     if not notif_name:
-        print("[DEBUG] NOTIFICATION_NAME ist leer oder nicht konfiguriert. Keine Benachrichtigungen werden verknüpft.")
+        print("[DEBUG-NOTIF] NOTIFICATION_NAME ist leer! Bitte in docker-compose.yml setzen.", flush=True)
         return None
     try:
-        print(f"[DEBUG] Frage verfügbare Benachrichtigungs-Kanäle von Uptime Kuma ab (gesucht: '{notif_name}')...")
+        print(f"[DEBUG-NOTIF] Frage Benachrichtigungs-Kanäle ab, suche nach: '{notif_name}'", flush=True)
         notifications = api.get_notifications()
-        print(f"[DEBUG] Von Uptime Kuma empfangene Benachrichtigungen: {notifications}")
+        print(f"[DEBUG-NOTIF] Empfangene Kanäle von Kuma: {notifications}", flush=True)
         
         for n in notifications:
             n_name = n.get("name")
             n_id = n.get("id")
             if n_name and n_name.lower() == notif_name.lower():
-                print(f"[DEBUG] Benachrichtigungs-Kanal '{n_name}' erfolgreich erkannt mit ID {n_id}")
+                print(f"[DEBUG-NOTIF] Benachrichtigungs-Kanal '{n_name}' erfolgreich erkannt mit ID {n_id}", flush=True)
                 return n_id
                 
-        print(f"[DEBUG] ACHTUNG: Benachrichtigungs-Kanal '{notif_name}' wurde in Uptime Kuma nicht gefunden!")
+        print(f"[DEBUG-NOTIF] ACHTUNG: Kanal '{notif_name}' wurde nicht gefunden!", flush=True)
     except Exception as e:
-        print(f"[DEBUG] Fehler beim Abrufen der Benachrichtigungen von Uptime Kuma: {e}")
+        print(f"[DEBUG-NOTIF] Fehler beim Abrufen der Benachrichtigungen: {e}", flush=True)
     return None
 
 def set_notification_default_status(api, notif_id, make_default=True):
@@ -149,7 +149,6 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
         with UptimeKumaApi(UPTIME_KUMA_URL) as api:
             api.login(UK_USER, UK_PASS)
             
-            # 1. Prüfen, ob ein gespeicherter Monitor in Uptime Kuma gelöscht wurde
             if monitor_id:
                 all_monitors = api.get_monitors()
                 exists = any(m.get("id") == monitor_id or m.get("monitorID") == monitor_id for m in all_monitors)
@@ -159,7 +158,6 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                     conn.commit()
                     monitor_id = None
 
-            # 2. Überspringen, wenn alles unverändert ist und existiert
             if monitor_id and db_friendly_name == name:
                 print(f"[DIAGNOSE] Monitor für '{expected_title}' unverändert. Sync übersprungen.", flush=True)
                 conn.close()
@@ -245,7 +243,6 @@ def on_message(client, userdata, msg):
                         cached_battery_group = get_or_create_group(api, BATTERY_GROUP_NAME)
                         cached_notif_id = get_notification_id(api, NOTIFICATION_NAME)
                         
-                        # --- WORKAROUND: Kanal temporär als Default setzen ---
                         if cached_notif_id:
                             set_notification_default_status(api, cached_notif_id, make_default=True)
                 except Exception as e:
@@ -277,7 +274,6 @@ def on_message(client, userdata, msg):
                 if has_battery:
                     sync_monitor_with_kuma(ieee, friendly_name, is_battery_monitor=True, cached_group_id=cached_battery_group)
 
-            # --- WORKAROUND: Default-Status der Benachrichtigung wieder zurücksetzen ---
             if UK_USER and UK_PASS and cached_notif_id:
                 try:
                     with UptimeKumaApi(UPTIME_KUMA_URL) as api:
