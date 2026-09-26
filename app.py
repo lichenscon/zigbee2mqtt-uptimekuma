@@ -4,9 +4,9 @@ import threading
 import time
 import json
 import requests
-import socketio
 import paho.mqtt.client as mqtt
 from flask import Flask, jsonify, request
+from uptime_kuma_api import UptimeKumaApi, MonitorType, UptimeKumaException
 
 app = Flask(__name__)
 
@@ -27,7 +27,6 @@ BATTERY_GROUP_NAME = os.getenv("BATTERY_GROUP_NAME", "Zigbee Batteriestand")
 BATTERY_THRESHOLD = int(os.getenv("BATTERY_THRESHOLD", 20))
 
 DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
-
 DB_PATH = "/app/data/devices.db"
 
 def log_debug(msg):
@@ -56,77 +55,29 @@ def init_db():
 
 init_db()
 
-# --- Uptime Kuma Socket.io Client ---
-sio = socketio.Client()
-uk_connected = threading.Event()
-
-@sio.event
-def connect():
-    print("Mit Uptime Kuma verbunden via Socket.io")
-    if UK_USER and UK_PASS:
-        try:
-            log_debug(f"Versuche Uptime Kuma Login mit Benutzer: {UK_USER}")
-            # Uptime Kuma erwartet für den Login oft ein Dictionary mit token oder user/pass
-            response = sio.call("login", {"username": UK_USER, "password": UK_PASS}, timeout=10)
-            log_debug(f"Uptime Kuma Login Antwort: {response}")
-            
-            # Manchmal gibt Kuma ein Dictionary mit {"ok": true} zurück
-            if isinstance(response, dict) and response.get("ok") == False:
-                print(f"Uptime Kuma Login vom Server abgelehnt: {response.get('msg', 'Unbekannter Fehler')}")
-            else:
-                print("Uptime Kuma Login erfolgreich.")
-                uk_connected.set()
-        except Exception as e:
-            print(f"Uptime Kuma Login fehlgeschlagen (Timeout oder Fehler): {e}")
-            # Optional: Falls kein Login zwingend nötig ist oder du testen willst, 
-            # ob der Sync ohne Login klappt, kannst du uk_connected.set() hier testweise setzen:
-            # uk_connected.set()
-    else:
-        print("Keine Uptime Kuma Zugangsdaten hinterlegt, überspringe Login.")
-        uk_connected.set()
-
-@sio.event
-def disconnect():
-    print("Verbindung zu Uptime Kuma getrennt.")
-    uk_connected.clear()
-
-def connect_uptime_kuma():
-    while True:
-        try:
-            if not sio.connected:
-                log_debug(f"Verbinde zu Uptime Kuma unter {UPTIME_KUMA_URL}...")
-                sio.connect(UPTIME_KUMA_URL, transports=["websocket", "polling"])
-        except Exception as e:
-            print(f"Konnte nicht mit Uptime Kuma verbinden: {e}")
-        time.sleep(10)
-
-threading.Thread(target=connect_uptime_kuma, daemon=True).start()
-
-def get_or_create_tag_id(tag_name, color="#00df9a"):
-    if not uk_connected.is_set():
-        log_debug("Socket.io nicht verbunden, kann Tag nicht abrufen/erstellen.")
-        return None
+# --- Uptime Kuma Sync über offizielle API ---
+def get_or_create_tag_id(api, tag_name, color="#00df9a"):
+    """Holt oder erstellt eine Monitor-Gruppe (Tag) über die Uptime Kuma API."""
     try:
-        log_debug(f"Frage Tags von Uptime Kuma ab für Gruppe: {tag_name}")
-        tags = sio.call("getTags")
+        tags = api.get_tags()
         for tag in tags:
             if tag.get("name") == tag_name:
                 log_debug(f"Tag '{tag_name}' gefunden mit ID {tag.get('id')}")
                 return tag.get("id")
         
         log_debug(f"Tag '{tag_name}' existiert nicht. Erstelle neuen Tag...")
-        res = sio.call("addTag", {"name": tag_name, "color": color})
-        if res.get("ok"):
-            tag_id = res.get("tagID")
-            log_debug(f"Tag '{tag_name}' erfolgreich erstellt mit ID {tag_id}")
-            return tag_id
+        res = api.add_tag(name=tag_name, color=color)
+        tag_id = res.get("tagID")
+        log_debug(f"Tag '{tag_name}' erfolgreich erstellt mit ID {tag_id}")
+        return tag_id
     except Exception as e:
         print(f"Fehler beim Verwalten der Gruppe {tag_name}: {e}")
-    return None
+        return None
 
 def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False):
-    if not uk_connected.is_set():
-        log_debug("Socket.io nicht verbunden, Monitor-Sync übersprungen.")
+    """Erstellt oder aktualisiert einen Monitor in Uptime Kuma mit der offiziellen API."""
+    if not UK_USER or not UK_PASS:
+        log_debug("Keine Uptime Kuma Zugangsdaten hinterlegt, Sync übersprungen.")
         return None
 
     conn = sqlite3.connect(DB_PATH)
@@ -138,52 +89,68 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False):
     
     monitor_id = row[0] if row else None
     group_name = BATTERY_GROUP_NAME if is_battery_monitor else ONLINE_GROUP_NAME
-    tag_id = get_or_create_tag_id(group_name)
     
     app_host_url = os.getenv("PUBLIC_APP_URL", "http://localhost:5000")
     endpoint_type = "battery" if is_battery_monitor else "online"
     default_url = f"{app_host_url}/api/device/{ieee}/{endpoint_type}"
-    
     monitor_title = f"{name} (Batterie)" if is_battery_monitor else f"{name} (Online)"
 
     try:
-        if not monitor_id:
-            log_debug(f"Erstelle neuen Uptime Kuma Monitor: {monitor_title}")
-            payload = {
-                "type": "http",
-                "name": monitor_title,
-                "url": default_url,
-                "interval": 60,
-                "maxretries": 3,
-                "retryInterval": 60,
-                "tags": [{"tagId": tag_id}] if tag_id else []
-            }
-            res = sio.call("add", payload)
-            if res.get("ok"):
-                monitor_id = res.get("monitorID")
+        with UptimeKumaApi(UPTIME_KUMA_URL) as api:
+            api.login(UK_USER, UK_PASS)
+            tag_id = get_or_create_tag_id(api, group_name)
+            
+            if not monitor_id:
+                log_debug(f"Erstelle neuen Uptime Kuma Monitor: {monitor_title}")
+                res = api.add_monitor(
+                    type=MonitorType.HTTP,
+                    name=monitor_title,
+                    url=default_url,
+                    interval=60,
+                    retry_interval=60,
+                    maxretries=3
+                )
+                monitor_id = res.get("monitorId")
+                
+                # Tag / Gruppe zuweisen falls vorhanden
+                if tag_id and monitor_id:
+                    try:
+                        api.add_monitor_tag(tag_id=tag_id, monitor_id=monitor_id)
+                    except Exception as tag_err:
+                        log_debug(f"Konnte Tag nicht zuweisen: {tag_err}")
+
                 cursor.execute(f"UPDATE devices SET {col_name} = ? WHERE ieee_address = ?", (monitor_id, ieee))
                 conn.commit()
-                print(f"Monitor erstellt für {monitor_title} (ID: {monitor_id})")
-        else:
-            log_debug(f"Aktualisiere bestehenden Uptime Kuma Monitor ID {monitor_id}: {monitor_title}")
-            payload = {
-                "id": monitor_id,
-                "type": "http",
-                "name": monitor_title,
-                "tags": [{"tagId": tag_id}] if tag_id else []
-            }
-            sio.call("edit", payload)
+                print(f"Monitor erfolgreich erstellt für {monitor_title} (ID: {monitor_id})")
+            else:
+                log_debug(f"Aktualisiere bestehenden Uptime Kuma Monitor ID {monitor_id}: {monitor_title}")
+                api.edit_monitor(
+                    id=monitor_id,
+                    type=MonitorType.HTTP,
+                    name=monitor_title,
+                    interval=60,
+                    retry_interval=60
+                )
+                if tag_id:
+                    try:
+                        api.add_monitor_tag(tag_id=tag_id, monitor_id=monitor_id)
+                    except Exception:
+                        pass
+                        
     except Exception as e:
         print(f"Fehler beim Sync mit Uptime Kuma für {monitor_title}: {e}")
     
     conn.close()
     return monitor_id
 
-# --- MQTT Integration ---
+# --- MQTT Client & Polling Loop ---
+mqtt_client_global = None
+
 def on_connect(client, userdata, flags, rc, properties=None):
     print(f"Verbunden mit MQTT Broker mit Code {rc}")
     client.subscribe(f"{ZIGBEE_TOPIC}/bridge/devices")
     client.subscribe(f"{ZIGBEE_TOPIC}/#")
+    client.publish(f"{ZIGBEE_TOPIC}/bridge/devices/get", "")
 
 def on_message(client, userdata, msg):
     try:
@@ -249,18 +216,33 @@ def on_message(client, userdata, msg):
     except Exception as e:
         print(f"Fehler bei MQTT Nachrichtenverarbeitung: {e}")
 
+def background_poll_loop():
+    global mqtt_client_global
+    log_debug(f"Starte Background-Polling-Loop mit Intervall: {POLL_INTERVAL} Sekunden.")
+    while True:
+        time.sleep(POLL_INTERVAL)
+        try:
+            if mqtt_client_global and mqtt_client_global.is_connected():
+                log_debug("Polling-Loop: Frage aktualisierte Gerätedaten bei Zigbee2MQTT an...")
+                mqtt_client_global.publish(f"{ZIGBEE_TOPIC}/bridge/devices/get", "")
+        except Exception as e:
+            print(f"Fehler im Polling-Loop: {e}")
+
 def start_mqtt():
+    global mqtt_client_global
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     if MQTT_USER and MQTT_PASSWORD:
         client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
     client.on_connect = on_connect
     client.on_message = on_message
+    mqtt_client_global = client
     
     while True:
         try:
             log_debug(f"Verbinde zu MQTT Broker {MQTT_BROKER}:{MQTT_PORT}...")
             client.connect(MQTT_BROKER, MQTT_PORT, 60)
             client.loop_start()
+            threading.Thread(target=background_poll_loop, daemon=True).start()
             break
         except Exception as e:
             print(f"MQTT Verbindungsfehler: {e}. Neuer Versuch in 5s...")
