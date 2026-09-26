@@ -213,8 +213,9 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
             # --- ZUVERLÄSSIGE BENACHRICHTIGUNGS-AKTIVIERUNG PER SOCKET.IO ---
             if notif_id and monitor_id and hasattr(api, "sio"):
                 try:
+                    print(f"[DIAGNOSE] Hole Monitor-Details für ID {monitorID if 'monitorID' in locals() else monitor_id} zur Benachrichtigungs-Aktualisierung...", flush=True)
                     monitors = api.get_monitors()
-                    target = next((m for m in monitors if m.get("id") == monitor_id), None)
+                    target = next((m for m in monitors if m.get("id") == monitor_id or m.get("monitorID") == monitor_id), None)
                     if target:
                         if "notifications" not in target or not isinstance(target["notifications"], dict):
                             target["notifications"] = {}
@@ -222,6 +223,8 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                         
                         sio_res = api.sio.call("edit", target)
                         print(f"[DIAGNOSE] Benachrichtigung per Sio.call 'edit' gesetzt für Monitor {monitor_id}: {sio_res}", flush=True)
+                    else:
+                        print(f"[DIAGNOSE] Konnte Monitor ID {monitor_id} für Benachrichtigungs-Update nicht in der Monitor-Liste finden.", flush=True)
                 except Exception as sio_err:
                     print(f"[DIAGNOSE] Sio.call Fehler bei Benachrichtigung: {sio_err}", flush=True)
 
