@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  zigbee-kuma-sync:
+    image: ghcr.io/lichenscon/zigbee2mqtt-uptimekuma:master
+    container_name: zigbee-kuma-sync
+    restart: unless-stopped
+    environment:
+      - MQTT_BROKER=mqtt://192.168.1.50:1883        # IP/Adresse deines MQTT-Brokers (auf dem Zigbee2MQTT läuft)
+      - MQTT_PORT=1883
+      - MQTT_USER=                                  # Falls Authentifizierung aktiv ist
+      - MQTT_PASSWORD=
+      - ZIGBEE2MQTT_BASE_TOPIC=zigbee2mqtt          # Standard-Topic von Zigbee2MQTT
+      - POLL_INTERVAL=60                            # Abfrageintervall in Sekunden
+      - UPTIME_KUMA_URL=http://uptime-kuma:3001     # URL zu deiner Uptime Kuma Instanz
+      - UPTIME_KUMA_USER=dein_admin_user            # Uptime Kuma Zugangsdaten (für Socket.io Login)
+      - UPTIME_KUMA_PASS=dein_admin_passwort
+      - ONLINE_GROUP_NAME=Zigbee Online Status      # Name der Monitor-Gruppe für Online-Status
+      - BATTERY_GROUP_NAME=Zigbee Batteriestand     # Name der Monitor-Gruppe für Batterie
+      - BATTERY_THRESHOLD=20                        # Mindestprozentwert (unterhalb wird HTTP 400/500 geworfen)
+      - APP_PORT=5000
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./data:/app/data
+    networks:
+      - default
+
+# Falls Uptime Kuma in einem anderen Docker-Netzwerk läuft, hier entsprechend anpassen oder das Netzwerk-External-Flag nutzen.
