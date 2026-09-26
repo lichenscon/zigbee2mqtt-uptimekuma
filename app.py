@@ -6,7 +6,7 @@ import json
 import requests
 import paho.mqtt.client as mqtt
 from flask import Flask, jsonify, request
-from uptime_kuma_api import UptimeKumaApi, MonitorType, UptimeKumaException
+from uptime_kuma_api import UptimeKumaApi, MonitorType
 
 app = Flask(__name__)
 
@@ -25,6 +25,10 @@ UK_PASS = os.getenv("UPTIME_KUMA_PASS", "")
 ONLINE_GROUP_NAME = os.getenv("ONLINE_GROUP_NAME", "Zigbee Online Status")
 BATTERY_GROUP_NAME = os.getenv("BATTERY_GROUP_NAME", "Zigbee Batteriestand")
 BATTERY_THRESHOLD = int(os.getenv("BATTERY_THRESHOLD", 20))
+MONITOR_INTERVAL = int(os.getenv("MONITOR_INTERVAL", 60))
+NOTIFICATION_NAME = os.getenv("NOTIFICATION_NAME", "")
+
+APP_PORT = int(os.getenv("APP_PORT", 5000))
 
 DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
 DB_PATH = "/app/data/devices.db"
@@ -55,27 +59,45 @@ def init_db():
 
 init_db()
 
-# --- Uptime Kuma Sync über offizielle API ---
-def get_or_create_tag_id(api, tag_name, color="#00df9a"):
-    """Holt oder erstellt eine Monitor-Gruppe (Tag) über die Uptime Kuma API."""
+# --- Uptime Kuma v2 API Sync (Echte Gruppen & Benachrichtigungen) ---
+def get_or_create_group(api, group_name):
+    """Sucht oder erstellt einen Uptime Kuma Gruppen-Monitor (Typ 'group') für einklappbare Seitenleisten-Ordner."""
     try:
-        tags = api.get_tags()
-        for tag in tags:
-            if tag.get("name") == tag_name:
-                log_debug(f"Tag '{tag_name}' gefunden mit ID {tag.get('id')}")
-                return tag.get("id")
+        monitors = api.get_monitors()
+        for m in monitors:
+            if m.get("name") == group_name and m.get("type") == "group":
+                log_debug(f"Gruppe '{group_name}' gefunden mit ID {m.get('id')}")
+                return m.get("id")
         
-        log_debug(f"Tag '{tag_name}' existiert nicht. Erstelle neuen Tag...")
-        res = api.add_tag(name=tag_name, color=color)
-        tag_id = res.get("tagID")
-        log_debug(f"Tag '{tag_name}' erfolgreich erstellt mit ID {tag_id}")
-        return tag_id
+        log_debug(f"Gruppe '{group_name}' existiert nicht. Erstelle neuen Gruppen-Monitor...")
+        res = api.add_monitor(
+            type=MonitorType.GROUP,
+            name=group_name
+        )
+        group_id = res.get("monitorId")
+        log_debug(f"Gruppe '{group_name}' erfolgreich erstellt mit ID {group_id}")
+        return group_id
     except Exception as e:
-        print(f"Fehler beim Verwalten der Gruppe {tag_name}: {e}")
+        print(f"Fehler beim Verwalten der Gruppe {group_name}: {e}")
         return None
 
+def get_notification_id(api, notif_name):
+    """Sucht die ID des konfigurierten Benachrichtigungs-Kanals anhand des Namens."""
+    if not notif_name:
+        return None
+    try:
+        notifications = api.get_notifications()
+        for n in notifications:
+            if n.get("name") == notif_name:
+                log_debug(f"Benachrichtigungs-Kanal '{notif_name}' gefunden mit ID {n.get('id')}")
+                return n.get("id")
+        log_debug(f"Warnung: Benachrichtigungs-Kanal '{notif_name}' wurde in Uptime Kuma nicht gefunden.")
+    except Exception as e:
+        print(f"Fehler beim Abrufen der Benachrichtigungen: {e}")
+    return None
+
 def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False):
-    """Erstellt oder aktualisiert einen Monitor in Uptime Kuma mit der offiziellen API."""
+    """Erstellt oder aktualisiert einen Monitor in Uptime Kuma und weist ihn der entsprechenden Gruppe zu."""
     if not UK_USER or not UK_PASS:
         log_debug("Keine Uptime Kuma Zugangsdaten hinterlegt, Sync übersprungen.")
         return None
@@ -98,45 +120,41 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False):
     try:
         with UptimeKumaApi(UPTIME_KUMA_URL) as api:
             api.login(UK_USER, UK_PASS)
-            tag_id = get_or_create_tag_id(api, group_name)
             
+            group_id = get_or_create_group(api, group_name)
+            notif_id = get_notification_id(api, NOTIFICATION_NAME)
+            
+            # Benachrichtigungs-Zuordnung aufbauen falls vorhanden
+            notifications_dict = {str(notif_id): True} if notif_id else {}
+
             if not monitor_id:
                 log_debug(f"Erstelle neuen Uptime Kuma Monitor: {monitor_title}")
                 res = api.add_monitor(
                     type=MonitorType.HTTP,
                     name=monitor_title,
                     url=default_url,
-                    interval=60,
-                    retry_interval=60,
-                    maxretries=3
+                    interval=MONITOR_INTERVAL,
+                    retry_interval=MONITOR_INTERVAL,
+                    maxretries=3,
+                    parent=group_id,
+                    notifications=notifications_dict
                 )
                 monitor_id = res.get("monitorId")
                 
-                # Tag / Gruppe zuweisen falls vorhanden
-                if tag_id and monitor_id:
-                    try:
-                        api.add_monitor_tag(tag_id=tag_id, monitor_id=monitor_id)
-                    except Exception as tag_err:
-                        log_debug(f"Konnte Tag nicht zuweisen: {tag_err}")
-
                 cursor.execute(f"UPDATE devices SET {col_name} = ? WHERE ieee_address = ?", (monitor_id, ieee))
                 conn.commit()
-                print(f"Monitor erfolgreich erstellt für {monitor_title} (ID: {monitor_id})")
+                print(f"Monitor erstellt für {monitor_title} (ID: {monitor_id}, Gruppe-ID: {group_id})")
             else:
                 log_debug(f"Aktualisiere bestehenden Uptime Kuma Monitor ID {monitor_id}: {monitor_title}")
                 api.edit_monitor(
                     id=monitor_id,
                     type=MonitorType.HTTP,
                     name=monitor_title,
-                    interval=60,
-                    retry_interval=60
+                    interval=MONITOR_INTERVAL,
+                    retry_interval=MONITOR_INTERVAL,
+                    parent=group_id,
+                    notifications=notifications_dict
                 )
-                if tag_id:
-                    try:
-                        api.add_monitor_tag(tag_id=tag_id, monitor_id=monitor_id)
-                    except Exception:
-                        pass
-                        
     except Exception as e:
         print(f"Fehler beim Sync mit Uptime Kuma für {monitor_title}: {e}")
     
@@ -316,4 +334,4 @@ def health():
 
 if __name__ == "__main__":
     print(f"Starte Flask-App (Debug-Modus: {DEBUG})...")
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=APP_PORT)
