@@ -49,7 +49,8 @@ def init_db():
             battery REAL,
             has_battery INTEGER,
             online_monitor_id INTEGER,
-            battery_monitor_id INTEGER
+            battery_monitor_id INTEGER,
+            last_seen REAL
         )
     """)
     conn.commit()
@@ -96,7 +97,7 @@ def get_notification_id(api, notif_name):
     return None
 
 def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id=None, cached_notif_id=None):
-    """Erstellt oder aktualisiert einen Monitor in Uptime Kuma kompatibel mit uptime-kuma-api2."""
+    """Erstellt oder aktualisiert einen Monitor in Uptime Kuma und verknüpft Benachrichtigungen."""
     if not UK_USER or not UK_PASS:
         log_debug("Keine Uptime Kuma Zugangsdaten hinterlegt, Sync übersprungen.")
         return None
@@ -157,14 +158,13 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                 cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
                 conn.commit()
             
-            # Falls ein Benachrichtigungs-Kanal definiert ist, diesen separat für den Monitor setzen (falls von der API unterstützt)
+            # Benachrichtigungs-Kanal dem Monitor zuweisen, falls in Uptime Kuma v2 API unterstützt
             if notif_id and monitor_id:
                 try:
-                    # Viele Uptime-Kuma-API-Versionen nutzen hierfür Setup-Funktionen oder direkte Zuordnungen
-                    # Sollte hierbei ein Fehler auftreten, fangen wir ihn ab, damit der Sync nicht abbricht
-                    pass
-                except Exception:
-                    pass
+                    api.add_monitor_notification(notification_id=notif_id, monitor_id=monitor_id)
+                    log_debug(f"Benachrichtigung ID {notif_id} für Monitor ID {monitor_id} aktiviert.")
+                except Exception as notif_err:
+                    log_debug(f"Konnte Benachrichtigung nicht direkt zuweisen: {notif_err}")
 
             time.sleep(1.0)
             
@@ -187,7 +187,6 @@ def on_message(client, userdata, msg):
     try:
         topic = msg.topic
         payload_str = msg.payload.decode("utf-8")
-        log_debug(f"MQTT Nachricht empfangen auf Topic: {topic}")
         
         if topic == f"{ZIGBEE_TOPIC}/bridge/devices":
             devices = json.loads(payload_str)
@@ -218,7 +217,6 @@ def on_message(client, userdata, msg):
                         has_battery = 1
                         break
                 
-                log_debug(f"Gerät verarbeitet: IEEE={ieee}, Name={friendly_name}, Batterie={has_battery}")
                 with sqlite3.connect(DB_PATH) as conn:
                     cursor = conn.cursor()
                     cursor.execute("""
@@ -247,14 +245,17 @@ def on_message(client, userdata, msg):
                     row = cursor.fetchone()
                     if row:
                         ieee, has_battery = row
-                        online = 1 if data.get("linkquality") is not None or data.get("state") is not None else None
+                        
+                        # Jede eingehende MQTT-Nachricht des Geräts bedeutet, es ist online und aktiv!
+                        online = 1
                         battery = data.get("battery")
+                        current_time = time.time()
                         
                         log_debug(f"Aktualisiere DB für IEEE {ieee}: online={online}, battery={battery}")
                         cursor.execute("""
-                            UPDATE devices SET online = COALESCE(?, online), battery = COALESCE(?, battery)
+                            UPDATE devices SET online = ?, battery = COALESCE(?, battery), last_seen = ?
                             WHERE ieee_address = ?
-                        """, (online, battery, ieee))
+                        """, (online, battery, current_time, ieee))
                         conn.commit()
                     else:
                         log_debug(f"Gerät mit Name '{dev_name}' nicht in DB gefunden.")
@@ -303,7 +304,7 @@ def check_online(ieee):
     log_debug(f"HTTP Anfrage /online für IEEE: {ieee}")
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT online, friendly_name FROM devices WHERE ieee_address = ?", (ieee,))
+    cursor.execute("SELECT online, last_seen, friendly_name FROM devices WHERE ieee_address = ?", (ieee,))
     row = cursor.fetchone()
     conn.close()
     
@@ -311,11 +312,18 @@ def check_online(ieee):
         log_debug(f"Gerät {ieee} nicht gefunden.")
         return jsonify({"error": "Device not found"}), 404
     
-    online, name = row
-    log_debug(f"Gerät {name} ({ieee}) Online-Status: {online}")
-    if online is None or online == 0:
+    online, last_seen, name = row
+    
+    # Optionaler Timeout-Check: Wenn ein Gerät seit z.B. 4 Stunden (14400 Sekunden) kein Lebenszeichen 
+    # von sich gegeben hat, werten wir es als offline, selbst wenn der letzte Status mal 1 war.
+    offline_timeout = int(os.getenv("OFFLINE_TIMEOUT_SECONDS", 14400))
+    current_time = time.time()
+    
+    if online is None or online == 0 or (last_seen and (current_time - last_seen) > offline_timeout):
+        log_debug(f"Gerät {name} ({ieee}) ist OFFLE (letztes Lebenszeichen vor {int(current_time - (last_seen or 0))}s)")
         return jsonify({"status": "offline", "device": name}), 503
     
+    log_debug(f"Gerät {name} ({ieee}) Status: ONLINE")
     return jsonify({"status": "online", "device": name}), 200
 
 @app.route("/api/device/<ieee>/battery", methods=["GET"])
