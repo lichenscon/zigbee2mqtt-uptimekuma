@@ -207,24 +207,27 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
             # --- EXPLIZITE BENACHRICHTIGUNGS-AKTIVIERUNG (GARANTIERT) ---
             # --- BENACHRICHTIGUNGS-AKTIVIERUNG (GETRENNT & ÜBERWACHT) ---
             # --- BENACHRICHTIGUNGS-AKTIVIERUNG (ÜBER SICHEREN EDIT-CALL) ---
+            # --- BENACHRICHTIGUNGS-AKTIVIERUNG (ROHER SOCKET.IO CALL MIT TIMEOUT) ---
             if notif_id and monitor_id:
-                print(f"[DIAGNOSE-NOTIF] Setze Benachrichtigung für Monitor {monitor_id} über Standard-Edit...", flush=True)
+                print(f"[DIAGNOSE-NOTIF] Sende rohes Socket.io Edit-Event für Monitor {monitor_id}...", flush=True)
                 try:
-                    # Viele Versionen von uptime-kuma-api akzeptieren notifications, wenn man sie direkt mitschickt
-                    api.edit_monitor(
-                        id=monitor_id,
-                        type=MonitorType.HTTP,
-                        name=expected_title,
-                        interval=MONITOR_INTERVAL,
-                        parent=group_id,
-                        notifications={str(notif_id): True}
-                    )
-                    print(f"[DIAGNOSE-NOTIF] Benachrichtigung erfolgreich via edit_monitor gesetzt!", flush=True)
-                except TypeError:
-                    # Falls der Wrapper das Argument blockiert, versuchen wir es ohne Crash abzufangen
-                    print(f"[DIAGNOSE-NOTIF] Wrapper blockiert notifications-Argument in edit_monitor.", flush=True)
-                except Exception as edit_err:
-                    print(f"[DIAGNOSE-NOTIF] Fehler beim Benachrichtigungs-Edit: {edit_err}", flush=True)
+                    if hasattr(api, "sio") and api.sio:
+                        edit_payload = {
+                            "id": monitor_id,
+                            "type": "http",
+                            "name": expected_title,
+                            "url": default_url,
+                            "interval": MONITOR_INTERVAL,
+                            "parent": group_id,
+                            "notifications": {str(notif_id): True}
+                        }
+                        # Timeout von 3 Sekunden, damit es niemals blockiert
+                        sio_res = api.sio.call("edit", edit_payload, timeout=3.0)
+                        print(f"[DIAGNOSE-NOTIF] Socket.io 'edit' erfolgreich! Antwort: {sio_res}", flush=True)
+                    else:
+                        print(f"[DIAGNOSE-NOTIF] api.sio nicht verfügbar.", flush=True)
+                except Exception as sio_err:
+                    print(f"[DIAGNOSE-NOTIF] Socket.io Call Hinweis/Fehler (nicht kritisch): {sio_err}", flush=True)
 
             time.sleep(1.0)
 
