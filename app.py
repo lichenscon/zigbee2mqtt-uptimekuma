@@ -105,7 +105,7 @@ def get_notification_id(api, notif_name):
     return None
 
 def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id=None, cached_notif_id=None):
-    """Erstellt oder aktualisiert einen Monitor in Uptime Kuma mit detailliertem Einzelschritt-Debugging."""
+    """Erstellt oder aktualisiert einen Monitor und erzwingt die Benachrichtigungs-Zuweisung via Update."""
     if not UK_USER or not UK_PASS:
         log_debug("Keine Uptime Kuma Zugangsdaten hinterlegt, Sync übersprungen.")
         return None
@@ -133,17 +133,14 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
     default_url = f"{app_host_url}/api/device/{ieee}/{endpoint_type}"
 
     try:
-        print(f"[DEBUG-SYNC] Starte Verbindung zu Uptime Kuma für: {expected_title}")
         with UptimeKumaApi(UPTIME_KUMA_URL) as api:
             api.login(UK_USER, UK_PASS)
-            print(f"[DEBUG-SYNC] Login erfolgreich.")
             
             group_id = cached_group_id if cached_group_id else get_or_create_group(api, group_name)
             notif_id = cached_notif_id if cached_notif_id else get_notification_id(api, NOTIFICATION_NAME)
-            print(f"[DEBUG-SYNC] Verwende group_id={group_id}, notif_id={notif_id}")
 
             if not monitor_id:
-                print(f"[DEBUG-SYNC] Rufe api.add_monitor auf für {expected_title}...")
+                log_debug(f"Erstelle neuen Uptime Kuma Monitor: {expected_title}")
                 res = api.add_monitor(
                     type=MonitorType.HTTP,
                     name=expected_title,
@@ -152,14 +149,13 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                     maxretries=3,
                     parent=group_id
                 )
-                print(f"[DEBUG-SYNC] add_monitor Antwort erhalten: {res}")
                 monitor_id = res.get("monitorId") or res.get("id")
                 
                 cursor.execute(f"UPDATE devices SET {col_name} = ?, friendly_name = ? WHERE ieee_address = ?", (monitor_id, name, ieee))
                 conn.commit()
-                print(f"[DEBUG-SYNC] Monitor erfolgreich in DB gespeichert (ID: {monitor_id})")
+                print(f"Monitor erstellt für {expected_title} (ID: {monitor_id})")
             else:
-                print(f"[DEBUG-SYNC] Rufe api.edit_monitor auf für ID {monitor_id}...")
+                log_debug(f"Aktualisiere bestehenden Uptime Kuma Monitor ID {monitor_id}: {expected_title}")
                 api.edit_monitor(
                     id=monitor_id,
                     type=MonitorType.HTTP,
@@ -169,27 +165,41 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                 )
                 cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
                 conn.commit()
-                print(f"[DEBUG-SYNC] Monitor ID {monitor_id} erfolgreich editiert.")
             
-            # Separate Benachrichtigungs-Zuweisung testen
+            # --- ZUVERLÄSSIGER BENACHRICHTIGUNGS-WORKAROUND ---
             if notif_id and monitor_id:
-                print(f"[DEBUG-SYNC] Versuche Benachrichtigung {notif_id} an Monitor {monitor_id} zu binden...")
                 try:
-                    # Test ob die Methode existiert
-                    if hasattr(api, "add_monitor_notification"):
-                        api.add_monitor_notification(notification_id=notif_id, monitor_id=monitor_id)
-                        print(f"[DEBUG-SYNC] api.add_monitor_notification erfolgreich ausgeführt.")
-                    else:
-                        print(f"[DEBUG-SYNC] Methode 'add_monitor_notification' existiert in dieser API-Version nicht!")
+                    log_debug(f"Aktualisiere Benachrichtigungen für Monitor ID {monitor_id} mit Kanal ID {notif_id}...")
+                    
+                    # Wir holen den frisch erstellten Monitor als Basis-Objekt ab
+                    monitors = api.get_monitors()
+                    current_monitor = next((m for m in monitors if m.get("id") == monitor_id), None)
+                    
+                    if current_monitor:
+                        # Das Benachrichtigungs-Mapping für diesen spezifischen Monitor setzen
+                        if "notifications" not in current_monitor or not isinstance(current_monitor["notifications"], dict):
+                            current_monitor["notifications"] = {}
+                        
+                        current_monitor["notifications"][str(notif_id)] = True
+                        
+                        # Wir übergeben das komplette modifizierte Dictionary an edit_monitor
+                        api.edit_monitor(
+                            id=monitor_id,
+                            type=MonitorType.HTTP,
+                            name=expected_title,
+                            url=default_url,
+                            interval=MONITOR_INTERVAL,
+                            parent=group_id,
+                            notifications=current_monitor["notifications"]
+                        )
+                        log_debug("Benachrichtigung erfolgreich über Monitor-Update injiziert.")
                 except Exception as sub_err:
-                    print(f"[DEBUG-SYNC] Fehler bei add_monitor_notification: {sub_err}")
+                    log_debug(f"Konnte Benachrichtigung nicht per Update erzwingen: {sub_err}")
 
             time.sleep(1.0)
             
     except Exception as e:
-        print(f"[ERROR-SYNC] Schwerwiegender Fehler beim Sync von {expected_title}: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Fehler beim Sync mit Uptime Kuma für {expected_title}: {e}")
     
     conn.close()
     return monitor_id
