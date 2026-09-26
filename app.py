@@ -27,7 +27,6 @@ BATTERY_GROUP_NAME = os.getenv("BATTERY_GROUP_NAME", "Zigbee Batteriestand")
 BATTERY_THRESHOLD = int(os.getenv("BATTERY_THRESHOLD", 20))
 MONITOR_INTERVAL = int(os.getenv("MONITOR_INTERVAL", 60))
 NOTIFICATION_NAME = os.getenv("NOTIFICATION_NAME", "")
-
 APP_PORT = int(os.getenv("APP_PORT", 5000))
 
 DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
@@ -59,7 +58,7 @@ def init_db():
 
 init_db()
 
-# --- Uptime Kuma v2 API Sync (Echte Gruppen & Benachrichtigungen) ---
+# --- Uptime Kuma v2 API Hilfsfunktionen ---
 def get_or_create_group(api, group_name):
     """Sucht oder erstellt einen Uptime Kuma Gruppen-Monitor (Typ 'group') für einklappbare Seitenleisten-Ordner."""
     try:
@@ -96,8 +95,8 @@ def get_notification_id(api, notif_name):
         print(f"Fehler beim Abrufen der Benachrichtigungen: {e}")
     return None
 
-def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False):
-    """Erstellt oder aktualisiert einen Monitor in Uptime Kuma und weist ihn der entsprechenden Gruppe zu."""
+def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id=None, cached_notif_id=None):
+    """Erstellt oder aktualisiert einen Monitor in Uptime Kuma kompatibel mit uptime-kuma-api2."""
     if not UK_USER or not UK_PASS:
         log_debug("Keine Uptime Kuma Zugangsdaten hinterlegt, Sync übersprungen.")
         return None
@@ -112,17 +111,15 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False):
     monitor_id = row[0] if row else None
     db_friendly_name = row[1] if row else None
     
-    # Optimierung: Wenn der Monitor bereits existiert und sich der Name nicht geändert hat,
-    # sparen wir uns den API-Aufruf komplett, um das Rate-Limit (Too frequently) zu umgehen!
     expected_title = f"{name} (Batterie)" if is_battery_monitor else f"{name} (Online)"
+    
     if monitor_id and db_friendly_name == name:
         log_debug(f"Monitor für '{expected_title}' unverändert. Sync übersprungen.")
         conn.close()
         return monitor_id
 
     group_name = BATTERY_GROUP_NAME if is_battery_monitor else ONLINE_GROUP_NAME
-    
-    app_host_url = os.getenv("PUBLIC_APP_URL", "http://localhost:5000")
+    app_host_url = os.getenv("PUBLIC_APP_URL", f"http://localhost:{APP_PORT}")
     endpoint_type = "battery" if is_battery_monitor else "online"
     default_url = f"{app_host_url}/api/device/{ieee}/{endpoint_type}"
 
@@ -130,8 +127,8 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False):
         with UptimeKumaApi(UPTIME_KUMA_URL) as api:
             api.login(UK_USER, UK_PASS)
             
-            group_id = get_or_create_group(api, group_name)
-            notif_id = get_notification_id(api, NOTIFICATION_NAME)
+            group_id = cached_group_id if cached_group_id else get_or_create_group(api, group_name)
+            notif_id = cached_notif_id if cached_notif_id else get_notification_id(api, NOTIFICATION_NAME)
             notifications_dict = {str(notif_id): True} if notif_id else {}
 
             if not monitor_id:
@@ -141,7 +138,6 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False):
                     name=expected_title,
                     url=default_url,
                     interval=MONITOR_INTERVAL,
-                    retry_interval=MONITOR_INTERVAL,
                     maxretries=3,
                     parent=group_id,
                     notifications=notifications_dict
@@ -158,15 +154,13 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False):
                     type=MonitorType.HTTP,
                     name=expected_title,
                     interval=MONITOR_INTERVAL,
-                    retry_interval=MONITOR_INTERVAL,
                     parent=group_id,
                     notifications=notifications_dict
                 )
                 cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
                 conn.commit()
             
-            # Wichtig: Kurze Pause, um Uptime Kuma nicht mit API-Calls zu fluten
-            time.sleep(0.5)
+            time.sleep(1.0)
             
     except Exception as e:
         print(f"Fehler beim Sync mit Uptime Kuma für {expected_title}: {e}")
@@ -192,6 +186,21 @@ def on_message(client, userdata, msg):
         if topic == f"{ZIGBEE_TOPIC}/bridge/devices":
             devices = json.loads(payload_str)
             log_debug(f"Bridge-Devices empfangen. Anzahl Geräte: {len(devices)}")
+            
+            cached_online_group = None
+            cached_battery_group = None
+            cached_notif_id = None
+            
+            if UK_USER and UK_PASS:
+                try:
+                    with UptimeKumaApi(UPTIME_KUMA_URL) as api:
+                        api.login(UK_USER, UK_PASS)
+                        cached_online_group = get_or_create_group(api, ONLINE_GROUP_NAME)
+                        cached_battery_group = get_or_create_group(api, BATTERY_GROUP_NAME)
+                        cached_notif_id = get_notification_id(api, NOTIFICATION_NAME)
+                except Exception as e:
+                    print(f"Konnte Uptime Kuma Gruppen/Benachrichtigungen nicht vorab laden: {e}")
+
             for d in devices:
                 if d.get("type") == "Coordinator":
                     continue
@@ -215,9 +224,9 @@ def on_message(client, userdata, msg):
                     """, (ieee, friendly_name, has_battery))
                     conn.commit()
                 
-                sync_monitor_with_kuma(ieee, friendly_name, is_battery_monitor=False)
+                sync_monitor_with_kuma(ieee, friendly_name, is_battery_monitor=False, cached_group_id=cached_online_group, cached_notif_id=cached_notif_id)
                 if has_battery:
-                    sync_monitor_with_kuma(ieee, friendly_name, is_battery_monitor=True)
+                    sync_monitor_with_kuma(ieee, friendly_name, is_battery_monitor=True, cached_group_id=cached_battery_group, cached_notif_id=cached_notif_id)
 
         else:
             parts = topic.split("/")
@@ -346,5 +355,5 @@ def health():
     return jsonify({"status": "healthy"}), 200
 
 if __name__ == "__main__":
-    print(f"Starte Flask-App (Debug-Modus: {DEBUG})...")
+    print(f"Starte Flask-App auf Port {APP_PORT} (Debug-Modus: {DEBUG})...")
     app.run(host="0.0.0.0", port=APP_PORT)
