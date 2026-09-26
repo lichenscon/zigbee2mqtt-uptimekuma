@@ -105,7 +105,7 @@ def get_notification_id(api, notif_name):
     return None
 
 def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id=None, cached_notif_id=None):
-    """Erstellt oder aktualisiert einen Monitor in Uptime Kuma und verknüpft Benachrichtigungen korrekt."""
+    """Erstellt oder aktualisiert einen Monitor in Uptime Kuma und verknüpft Benachrichtigungen separat."""
     if not UK_USER or not UK_PASS:
         log_debug("Keine Uptime Kuma Zugangsdaten hinterlegt, Sync übersprungen.")
         return None
@@ -138,20 +138,16 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
             
             group_id = cached_group_id if cached_group_id else get_or_create_group(api, group_name)
             notif_id = cached_notif_id if cached_notif_id else get_notification_id(api, NOTIFICATION_NAME)
-            
-            # Wichtig: Die API erwartet hier integer-basierte oder string-basierte Schlüssel in einem Dict
-            notifications_dict = {int(notif_id): True} if notif_id else {}
 
             if not monitor_id:
-                log_debug(f"Erstelle neuen Uptime Kuma Monitor: {expected_title} mit Notifications: {notifications_dict}")
+                log_debug(f"Erstelle neuen Uptime Kuma Monitor: {expected_title}")
                 res = api.add_monitor(
                     type=MonitorType.HTTP,
                     name=expected_title,
                     url=default_url,
                     interval=MONITOR_INTERVAL,
                     maxretries=3,
-                    parent=group_id,
-                    notifications=notifications_dict
+                    parent=group_id
                 )
                 monitor_id = res.get("monitorId")
                 
@@ -165,12 +161,20 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                     type=MonitorType.HTTP,
                     name=expected_title,
                     interval=MONITOR_INTERVAL,
-                    parent=group_id,
-                    notifications=notifications_dict
+                    parent=group_id
                 )
                 cursor.execute(f"UPDATE devices SET friendly_name = ? WHERE ieee_address = ?", (name, ieee))
                 conn.commit()
             
+            # Benachrichtigung im Anschluss separat verknüpfen
+            if notif_id and monitor_id:
+                try:
+                    log_debug(f"Verknüpfe Benachrichtigung ID {notif_id} mit Monitor ID {monitor_id}...")
+                    api.add_monitor_notification(notification_id=notif_id, monitor_id=monitor_id)
+                    log_debug("Benachrichtigung erfolgreich verknüpft.")
+                except Exception as notif_err:
+                    log_debug(f"Hinweis zur Benachrichtigungs-Verknüpfung: {notif_err}")
+
             time.sleep(1.0)
             
     except Exception as e:
