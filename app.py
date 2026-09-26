@@ -205,16 +205,25 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                 conn.commit()
 
             # --- EXPLIZITE BENACHRICHTIGUNGS-AKTIVIERUNG (GARANTIERT) ---
+            # --- BENACHRICHTIGUNGS-AKTIVIERUNG (GETRENNT & ÜBERWACHT) ---
             if notif_id and monitor_id:
-                print(f"[DIAGNOSE] Aktiviere Benachrichtigung für Monitor {monitor_id} (Kanal {notif_id})...", flush=True)
+                print(f"[DIAGNOSE-NOTIF] Starte Benachrichtigungs-Aktivierung für Monitor {monitor_id} mit Kanal {notif_id}...", flush=True)
+                
+                # Versuch 1: Über direkte Bibliotheksfunktion falls vorhanden
                 try:
-                    # Methode 1: Über den direkten Wrapper-Befehl falls vorhanden
                     if hasattr(api, "add_monitor_notification"):
+                        print(f"[DIAGNOSE-NOTIF] Versuche api.add_monitor_notification...", flush=True)
                         api.add_monitor_notification(notification_id=notif_id, monitor_id=monitor_id)
-                        print(f"[DIAGNOSE] add_monitor_notification erfolgreich.", flush=True)
-                    
-                    # Methode 2: Über Socket.io Rohdaten-Edit, falls api.sio existiert
-                    if hasattr(api, "sio") and api.sio.connected:
+                        print(f"[DIAGNOSE-NOTIF] Erfolg mit add_monitor_notification!", flush=True)
+                    else:
+                        print(f"[DIAGNOSE-NOTIF] Methode add_monitor_notification nicht im API-Objekt gefunden.", flush=True)
+                except Exception as e1:
+                    print(f"[DIAGNOSE-NOTIF] Fehler bei add_monitor_notification: {e1}", flush=True)
+
+                # Versuch 2: Über Socket.io Rohdaten-Edit
+                try:
+                    if hasattr(api, "sio") and api.sio:
+                        print(f"[DIAGNOSE-NOTIF] Versuche Socket.io 'edit' Call...", flush=True)
                         edit_payload = {
                             "id": monitor_id,
                             "type": "http",
@@ -225,12 +234,14 @@ def sync_monitor_with_kuma(ieee, name, is_battery_monitor=False, cached_group_id
                             "notifications": {str(notif_id): True}
                         }
                         sio_res = api.sio.call("edit", edit_payload)
-                        print(f"[DIAGNOSE] Sio.call 'edit' Antwort: {sio_res}", flush=True)
-                except Exception as notif_err:
-                    print(f"[DIAGNOSE-FEHLER] Konnte Benachrichtigung nicht setzen: {notif_err}", flush=True)
+                        print(f"[DIAGNOSE-NOTIF] Socket.io 'edit' Antwort: {sio_res}", flush=True)
+                    else:
+                        print(f"[DIAGNOSE-NOTIF] api.sio ist nicht verfügbar.", flush=True)
+                except Exception as e2:
+                    print(f"[DIAGNOSE-NOTIF] Fehler beim Socket.io 'edit' Call: {e2}", flush=True)
 
             time.sleep(1.0)
-            
+
     except Exception as e:
         print(f"[DIAGNOSE-CRITICAL] Fehler in sync_monitor_with_kuma: {e}", flush=True)
         import traceback
